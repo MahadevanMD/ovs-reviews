@@ -158,8 +158,6 @@ enum ofperr ofconn_pktbuf_retrieve(struct ofconn *, uint32_t id,
 
 bool ofconn_has_pending_opgroups(const struct ofconn *);
 void ofconn_add_opgroup(struct ofconn *, struct list *);
-void ofconn_remove_opgroup(struct ofconn *, struct list *,
-                           const struct ofp_header *request, int error);
 
 /* Sending asynchronous messages. */
 bool connmgr_wants_packet_in_on_miss(struct connmgr *mgr);
