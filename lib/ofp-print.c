@@ -2746,7 +2746,7 @@ ofp_print_bundle_add(struct ds *s, const struct ofp_header *oh, int verbosity)
     ofp_print_bit_names(s, badd.flags, bundle_flags_to_name, ' ');
 
     ds_put_char(s, '\n');
-    msg = ofp_to_string(badd.msg, badd.length, verbosity);
+    msg = ofp_to_string(badd.msg, ntohs(badd.msg->length), verbosity);
     if (msg) {
         ds_put_cstr(s, msg);
     }

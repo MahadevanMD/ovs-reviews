@@ -236,7 +236,7 @@ enum ofpraw {
     /* OFPT 1.4+ (33): struct ofp14_bundle_ctrl_msg, uint8_t[8][]. */
     OFPRAW_OFPT14_BUNDLE_CONTROL,
 
-    /* OFPT 1.4+ (34): struct ofp14_bundle_add_msg, uint8_t[]. */
+    /* OFPT 1.4+ (34): struct ofp14_bundle_ctrl_msg, uint8_t[]. */
     OFPRAW_OFPT14_BUNDLE_ADD_MESSAGE,
 
 /* Standard statistics. */

@@ -7096,23 +7096,22 @@ enum ofperr
 ofputil_decode_bundle_add(const struct ofp_header *oh,
                           struct ofputil_bundle_add_msg *msg)
 {
+    const struct ofp14_bundle_ctrl_msg *m;
     struct ofpbuf b;
     enum ofpraw raw;
-    size_t inner_size;
-    const struct ofp14_bundle_add_msg *m;
+    size_t inner_len;
 
     ofpbuf_use_const(&b, oh, ntohs(oh->length));
     raw = ofpraw_pull_assert(&b);
     ovs_assert(raw == OFPRAW_OFPT14_BUNDLE_ADD_MESSAGE);
 
-    m = ofpbuf_l3(&b);
+    m = ofpbuf_pull(&b, sizeof *m);
     msg->bundle_id = ntohl(m->bundle_id);
     msg->flags = ntohs(m->flags);
-    msg->length = ntohs(m->message.length);
-    msg->msg = &m->message;
 
-    inner_size = ntohs(oh->length) - sizeof *m;
-    if (ntohs(msg->msg->length) - sizeof *oh > inner_size) {
+    msg->msg = ofpbuf_data(&b);
+    inner_len = ntohs(msg->msg->length);
+    if (inner_len < sizeof(struct ofp_header) || inner_len > ofpbuf_size(&b)) {
         return OFPERR_OFPBFC_MSG_BAD_LEN;
     }
 
@@ -7131,9 +7130,7 @@ ofputil_encode_bundle_add(enum ofp_version ofp_version,
 
     m->bundle_id = htonl(msg->bundle_id);
     m->flags = htons(msg->flags);
-
-    ofpbuf_put_zeros(request, msg->length - sizeof(*msg->msg));
-    memcpy(&m->message, msg->msg, msg->length);
+    ofpbuf_put(request, msg->msg, ntohs(msg->msg->length));
 
     return request;
 }

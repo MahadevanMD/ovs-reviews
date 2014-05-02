@@ -1147,7 +1147,6 @@ struct ofputil_bundle_add_msg {
     uint32_t            bundle_id;
     uint16_t            flags;
     const struct ofp_header   *msg;
-    uint16_t            length;
 };
 
 enum ofperr ofputil_decode_bundle_ctrl(const struct ofp_header *,

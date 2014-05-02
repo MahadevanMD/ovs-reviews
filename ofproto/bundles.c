@@ -224,7 +224,6 @@ ofp_bundle_discard(struct ofconn *ofconn, uint32_t id)
 enum ofperr
 ofp_bundle_add_message(struct ofconn *ofconn, struct ofputil_bundle_add_msg *badd)
 {
-    struct ofp_header *msg;
     struct hmap *bundles;
     struct ofp_bundle *bundle;
     struct bundle_message *bmsg;
@@ -245,12 +244,8 @@ ofp_bundle_add_message(struct ofconn *ofconn, struct ofputil_bundle_add_msg *bad
         return OFPERR_OFPBFC_BUNDLE_CLOSED;
     }
 
-    msg = xmemdup(badd->msg, badd->length);
-
-    bmsg = xmalloc(sizeof(*bmsg));
-    bmsg->msg = msg;
-
+    bmsg = xmalloc(sizeof *bmsg);
+    bmsg->msg = xmemdup(badd->msg, ntohs(badd->msg->length));
     list_push_back(&bundle->msg_list, &bmsg->node);
-
     return 0;
 }
