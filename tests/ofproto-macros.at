@@ -98,6 +98,20 @@ check_logs () {
 /|ERR|/p
 /|EMER|/p" ovs-vswitchd.log ovsdb-server.log
 }
+
+check_cores () {
+    for core in core*; do
+        if test -f "$core"; then
+            echo "$core: core dumped during test"
+
+            # If "file" is installed then this is likely to give a little
+            # extra information about it, such as the program's name and
+            # command line.  If "file" isn't installed then it should be
+            # harmless
+            (file "./$core") 2>/dev/null
+        fi
+    done
+}
 m4_divert_pop([PREPARE_TESTS])
 
 # OVS_VSWITCHD_STOP([WHITELIST])
@@ -108,8 +122,12 @@ m4_divert_pop([PREPARE_TESTS])
 # commands to delete any warnings that are actually expected, e.g.:
 #
 #   OVS_VSWITCHD_STOP(["/expected error/d"])
+#
+# Also tries to check for core dumps, although this only works if your system
+# produces its core dumps in the current directory and gives them names that
+# begin with "core".
 m4_define([OVS_VSWITCHD_STOP],
-  [AT_CHECK([check_logs $1])
+  [AT_CHECK([check_logs $1 && check_cores])
    AT_CHECK([ovs-appctl -t ovs-vswitchd exit])
    AT_CHECK([ovs-appctl -t ovsdb-server exit])])
 
