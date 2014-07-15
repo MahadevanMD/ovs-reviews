@@ -1562,6 +1562,30 @@ dpif_netdev_execute(struct dpif *dpif, struct dpif_execute *execute)
 }
 
 static void
+dpif_netdev_operate(struct dpif *dpif, struct dpif_op **ops, size_t n_ops)
+{
+    size_t i;
+
+    for (i = 0; i < n_ops; i++) {
+        struct dpif_op *op = ops[i];
+
+        switch (op->type) {
+        case DPIF_OP_FLOW_PUT:
+            op->error = dpif_netdev_flow_put(dpif, &op->u.flow_put);
+            break;
+
+        case DPIF_OP_FLOW_DEL:
+            op->error = dpif_netdev_flow_del(dpif, &op->u.flow_del);
+            break;
+
+        case DPIF_OP_EXECUTE:
+            op->error = dpif_netdev_execute(dpif, &op->u.execute);
+            break;
+        }
+    }
+}
+
+static void
 dp_netdev_destroy_all_queues(struct dp_netdev *dp)
     OVS_REQ_WRLOCK(dp->queue_rwlock)
 {
@@ -2382,16 +2406,13 @@ const struct dpif_class dpif_netdev_class = {
     dpif_netdev_port_poll,
     dpif_netdev_port_poll_wait,
     dpif_netdev_flow_get,
-    dpif_netdev_flow_put,
-    dpif_netdev_flow_del,
     dpif_netdev_flow_flush,
     dpif_netdev_flow_dump_create,
     dpif_netdev_flow_dump_destroy,
     dpif_netdev_flow_dump_thread_create,
     dpif_netdev_flow_dump_thread_destroy,
     dpif_netdev_flow_dump_next,
-    dpif_netdev_execute,
-    NULL,                       /* operate */
+    dpif_netdev_operate,
     dpif_netdev_recv_set,
     dpif_netdev_handlers_set,
     dpif_netdev_queue_to_priority,
