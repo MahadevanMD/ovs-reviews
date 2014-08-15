@@ -17,6 +17,9 @@ Post-v2.3.0
      * OpenFlow 1.5 (draft) Copy-Field action is now supported.
      * OpenFlow 1.3+ table features requests are now supported (read-only).
      * Nicira extension "move" actions may now be included in action sets.
+   - test-controller has been renamed ovs-testcontroller at request of users
+     who find it useful for testing basic OpenFlow setups.  It is still not
+     a necessary or desirable part of most Open vSwitch deployments.
 
 
 v2.3.0 - 14 Aug 2014
