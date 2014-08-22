@@ -1305,13 +1305,11 @@ revalidate_ukey(struct udpif *udpif, struct udpif_key *ukey,
 
     /* We will push the stats, so update the ukey stats cache. */
     ukey->stats = f->stats;
-    if (!push.n_packets && !udpif->need_revalidate) {
-        ok = true;
-        goto exit;
-    }
-
-    if (ukey->xcache && !udpif->need_revalidate) {
+    if (ukey->xcache) {
         xlate_push_stats(ukey->xcache, &push);
+        memset(&push, 0, sizeof push);
+    }
+    if (!push.n_packets && !udpif->need_revalidate) {
         ok = true;
         goto exit;
     }
