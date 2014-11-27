@@ -1,5 +1,5 @@
-EXTRA_DIST += \
-	tutorial/Tutorial.md \
+docs += tutorial/Tutorial.md
+EXTRA_DIST +=
 	tutorial/ovs-sandbox \
 	tutorial/t-setup \
 	tutorial/t-stage0 \
