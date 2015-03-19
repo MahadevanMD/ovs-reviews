@@ -88,6 +88,9 @@ static struct jsonrpc_msg *ovsdb_jsonrpc_monitor_cancel(
 static void ovsdb_jsonrpc_monitor_remove_all(struct ovsdb_jsonrpc_session *);
 static void ovsdb_jsonrpc_monitor_flush_all(struct ovsdb_jsonrpc_session *);
 static bool ovsdb_jsonrpc_monitor_needs_flush(struct ovsdb_jsonrpc_session *);
+static struct json *ovsdb_jsonrpc_monitor_compose_table_update(
+    const struct ovsdb_jsonrpc_monitor *monitor, bool initial);
+
 
 /* JSON-RPC database server. */
 
@@ -1227,7 +1230,9 @@ ovsdb_jsonrpc_monitor_create(struct ovsdb_jsonrpc_session *s, struct ovsdb *db,
         }
     }
 
-    return ovsdb_monitor_get_initial(m->dbmon);
+    ovsdb_monitor_get_initial(m->dbmon);
+    json = ovsdb_jsonrpc_monitor_compose_table_update(m, true);
+    return json ? json : json_object_create();
 
 error:
     if (m) {
