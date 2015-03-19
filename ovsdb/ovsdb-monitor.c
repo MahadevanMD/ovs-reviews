@@ -41,6 +41,7 @@ VLOG_DEFINE_THIS_MODULE(ovsdb_monitor);
 
 static const struct ovsdb_replica_class ovsdb_jsonrpc_replica_class;
 static struct hmap ovsdb_monitors;
+static struct hmap json_cache__;
 
 /*  Backend monitor.
  *
@@ -56,6 +57,15 @@ struct ovsdb_monitor {
     uint64_t n_transactions;      /* Count number of commited transactions. */
 
     struct hmap_node hmap_node;   /* Elements within ovsdb_monitors.  */
+};
+
+/* A json object of updates between 'from_txn' and 'dbmon->n_transactions'
+ * inclusive.  */
+struct ovsdb_monitor_json_cache_node {
+    struct hmap_node hmap_node;   /* Elements in json cache. */
+    const struct ovsdb_monitor *dbmon;
+    uint64_t from_txn;
+    struct json *json;            /* Null, or a cloned of json */
 };
 
 struct jsonrpc_monitor_node {
@@ -121,6 +131,84 @@ static void ovsdb_monitor_changes_destroy_rows(
                                   struct ovsdb_monitor_changes *changes);
 static void ovsdb_monitor_table_track_changes(struct ovsdb_monitor_table *mt,
                                   uint64_t unflushed);
+
+static struct hmap *
+get_json_cache(void)
+{
+    static bool init__ = false;
+
+    if (!init__) {
+        hmap_init(&json_cache__);
+	init__ = true;
+    }
+    return &json_cache__;
+}
+
+static uint32_t
+ovsdb_monitor_json_cache_hash(const struct ovsdb_monitor *dbmon,
+                              uint64_t from_txn)
+{
+    uint32_t hash;
+
+    hash = hash_uint64(from_txn);
+    hash = hash_pointer(dbmon, hash);
+    return hash;
+}
+
+static struct ovsdb_monitor_json_cache_node *
+ovsdb_monitor_json_cache_search(const struct ovsdb_monitor *dbmon,
+                                uint64_t from_txn)
+{
+    struct ovsdb_monitor_json_cache_node *node;
+    struct hmap *json_cache = get_json_cache();
+    uint32_t hash;
+
+    hash = ovsdb_monitor_json_cache_hash(dbmon, from_txn);
+
+    HMAP_FOR_EACH_WITH_HASH(node, hmap_node, hash, json_cache) {
+        if ((node->from_txn == from_txn) && (node->dbmon == dbmon)) {
+                return node;
+        }
+    }
+
+    return NULL;
+}
+
+static void
+ovsdb_monitor_json_cache_insert(const struct ovsdb_monitor *dbmon,
+                                uint64_t from_txn, struct json *json)
+{
+    struct ovsdb_monitor_json_cache_node *node;
+    struct hmap *json_cache = get_json_cache();
+    uint32_t hash;
+
+    hash = ovsdb_monitor_json_cache_hash(dbmon, from_txn);
+
+    node = xmalloc(sizeof *node);
+
+    node->from_txn = from_txn;
+    node->json = json ? json_clone(json) : NULL;
+    node->dbmon = dbmon;
+
+    hmap_insert(json_cache, &node->hmap_node, hash);
+}
+
+static void
+ovsdb_monitor_json_cache_flush(struct ovsdb_monitor *dbmon)
+{
+    struct ovsdb_monitor_json_cache_node *node, *next;
+    struct hmap *json_cache = get_json_cache();
+
+    HMAP_FOR_EACH_SAFE(node, next, hmap_node, json_cache) {
+        if (node->dbmon == dbmon) {
+            hmap_remove(json_cache, &node->hmap_node);
+            if (node->json) {
+                json_destroy(node->json);
+            }
+            free(node);
+        }
+    }
+}
 
 static int
 compare_ovsdb_monitor_column(const void *a_, const void *b_)
@@ -499,6 +587,7 @@ struct json *
 ovsdb_monitor_compose_update(const struct ovsdb_monitor *dbmon,
                              bool initial, uint64_t *unflushed)
 {
+    struct ovsdb_monitor_json_cache_node *cache_node;
     struct shash_node *node;
     unsigned long int *changed;
     struct json *json;
@@ -507,6 +596,12 @@ ovsdb_monitor_compose_update(const struct ovsdb_monitor *dbmon,
 
     from_txn = initial ? 0 : *unflushed;
     *unflushed = dbmon->n_transactions + 1;
+
+    /* Return cached json if one has been created already */
+    cache_node = ovsdb_monitor_json_cache_search(dbmon, from_txn);
+    if (cache_node) {
+        return cache_node->json ? json_clone(cache_node->json) : NULL;
+    }
 
     max_columns = 0;
     SHASH_FOR_EACH (node, &dbmon->tables) {
@@ -555,6 +650,8 @@ ovsdb_monitor_compose_update(const struct ovsdb_monitor *dbmon,
     }
 
     free(changed);
+
+    ovsdb_monitor_json_cache_insert(dbmon, from_txn, json);
     return json;
 }
 
@@ -871,6 +968,8 @@ ovsdb_monitor_destroy(struct ovsdb_monitor *dbmon)
         hmap_remove(&ovsdb_monitors, &dbmon->hmap_node);
     }
 
+    ovsdb_monitor_json_cache_flush(dbmon);
+
     SHASH_FOR_EACH (node, &dbmon->tables) {
         struct ovsdb_monitor_table *mt = node->data;
         struct ovsdb_monitor_changes *changes, *next;
@@ -896,6 +995,7 @@ ovsdb_monitor_commit(struct ovsdb_replica *replica,
     struct ovsdb_monitor *m = ovsdb_monitor_cast(replica);
     struct ovsdb_monitor_aux aux;
 
+    ovsdb_monitor_json_cache_flush(m);
     ovsdb_monitor_init_aux(&aux, m);
     ovsdb_txn_for_each_change(txn, ovsdb_monitor_change_cb, &aux);
     m->n_transactions++;
