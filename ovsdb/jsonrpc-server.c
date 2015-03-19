@@ -1093,8 +1093,8 @@ static const struct ovsdb_replica_class ovsdb_jsonrpc_replica_class;
 struct ovsdb_jsonrpc_monitor *ovsdb_jsonrpc_monitor_find(
     struct ovsdb_jsonrpc_session *, const struct json *monitor_id);
 static void ovsdb_monitor_destroy(struct ovsdb_replica *);
-static struct json *ovsdb_jsonrpc_monitor_get_initial(
-    const struct ovsdb_jsonrpc_monitor *);
+static struct json *ovsdb_monitor_get_initial(
+    const struct ovsdb_monitor *);
 
 static bool
 parse_bool(struct ovsdb_parser *parser, const char *name, bool default_value)
@@ -1383,7 +1383,7 @@ ovsdb_jsonrpc_monitor_create(struct ovsdb_jsonrpc_session *s, struct ovsdb *db,
         }
     }
 
-    return ovsdb_jsonrpc_monitor_get_initial(m);
+    return ovsdb_monitor_get_initial(m->dbmon);
 
 error:
     if (m) {
@@ -1809,14 +1809,14 @@ ovsdb_monitor_commit(struct ovsdb_replica *replica,
 }
 
 static struct json *
-ovsdb_jsonrpc_monitor_get_initial(const struct ovsdb_jsonrpc_monitor *m)
+ovsdb_monitor_get_initial(const struct ovsdb_monitor *dbmon)
 {
     struct ovsdb_monitor_aux aux;
     struct shash_node *node;
     struct json *json;
 
-    ovsdb_monitor_init_aux(&aux, m->dbmon);
-    SHASH_FOR_EACH (node, &m->dbmon->tables) {
+    ovsdb_monitor_init_aux(&aux, dbmon);
+    SHASH_FOR_EACH (node, &dbmon->tables) {
         struct ovsdb_monitor_table *mt = node->data;
 
         if (mt->select & OJMS_INITIAL) {
@@ -1827,7 +1827,7 @@ ovsdb_jsonrpc_monitor_get_initial(const struct ovsdb_jsonrpc_monitor *m)
             }
         }
     }
-    json = ovsdb_jsonrpc_monitor_compose_table_update(m, true);
+    json = ovsdb_jsonrpc_monitor_compose_table_update(dbmon, true);
     return json ? json : json_object_create();
 }
 
