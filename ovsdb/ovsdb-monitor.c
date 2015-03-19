@@ -73,6 +73,22 @@ struct ovsdb_monitor_row {
     struct ovsdb_datum *new;    /* New data, NULL for a deleted row. */
 };
 
+/* Contains 'struct ovsdb_monitor_row's for rows that have been
+ * updated but not yet flushed to all the jsonrpc connection.
+ *
+ * 'n_refs' represent the number of jsonrpc connections that have
+ * not received updates. Generate the update for the last jsonprc
+ * connection will also remove rows contained in 'changes'.
+ *
+ * 'transaction' stores the first update's transaction id.
+ * */
+struct ovsdb_monitor_changes {
+    struct ovsdb_monitor_table *mt;
+    struct hmap rows;
+    int n_refs;
+    uint64_t transaction;
+};
+
 /* A particular table being monitored. */
 struct ovsdb_monitor_table {
     const struct ovsdb_table *table;
@@ -87,10 +103,16 @@ struct ovsdb_monitor_table {
 
     /* Contains 'struct ovsdb_monitor_row's for rows that have been
      * updated but not yet flushed to the jsonrpc connection. */
-    struct hmap changes;
+    struct ovsdb_monitor_changes *changes;
 };
 
 static void ovsdb_monitor_destroy(struct ovsdb_monitor *dbmon);
+static void ovsdb_monitor_table_add_changes(struct ovsdb_monitor_table *mt,
+                                            uint64_t next_txn);
+static void ovsdb_monitor_changes_destroy_rows(
+                                  struct ovsdb_monitor_changes *changes);
+static void ovsdb_monitor_table_track_changes(struct ovsdb_monitor_table *mt,
+                                  uint64_t transaction);
 
 static int
 compare_ovsdb_monitor_column(const void *a_, const void *b_)
@@ -108,7 +130,7 @@ ovsdb_monitor_cast(struct ovsdb_replica *replica)
     return CONTAINER_OF(replica, struct ovsdb_monitor, replica);
 }
 
-/* Finds and returns the ovsdb_monitor_row in 'mt->changes' for the
+/* Finds and returns the ovsdb_monitor_row in 'mt->changes->rows' for the
  * given 'uuid', or NULL if there is no such row. */
 static struct ovsdb_monitor_row *
 ovsdb_monitor_row_find(const struct ovsdb_monitor_table *mt,
@@ -116,7 +138,8 @@ ovsdb_monitor_row_find(const struct ovsdb_monitor_table *mt,
 {
     struct ovsdb_monitor_row *row;
 
-    HMAP_FOR_EACH_WITH_HASH (row, hmap_node, uuid_hash(uuid), &mt->changes) {
+    HMAP_FOR_EACH_WITH_HASH (row, hmap_node, uuid_hash(uuid),
+                             &mt->changes->rows) {
         if (uuid_equals(uuid, &row->uuid)) {
             return row;
         }
@@ -235,7 +258,7 @@ ovsdb_monitor_add_table(struct ovsdb_monitor *m,
 
     mt = xzalloc(sizeof *mt);
     mt->table = table;
-    hmap_init(&mt->changes);
+    mt->changes = NULL;
     shash_add(&m->tables, table->schema->name, mt);
 }
 
@@ -286,6 +309,70 @@ ovsdb_monitor_table_check_duplicates(struct ovsdb_monitor *m,
     }
 
     return NULL;
+}
+
+static void
+ovsdb_monitor_table_add_changes(struct ovsdb_monitor_table *mt,
+                                uint64_t next_txn)
+{
+    struct ovsdb_monitor_changes *changes;
+
+    changes = xzalloc(sizeof *changes);
+
+    changes->transaction = next_txn;
+    changes->mt = mt;
+    changes->n_refs = 1;
+    hmap_init(&changes->rows);
+    mt->changes = changes;
+};
+
+/* Stop currently tracking changes to table 'mt' since 'transaction'.
+ *
+ * Return 'true' if the 'transaction' is being tracked. 'false' otherwise. */
+static void
+ovsdb_monitor_table_untrack_changes(struct ovsdb_monitor_table *mt,
+                                    uint64_t transaction)
+{
+    struct ovsdb_monitor_changes *changes;
+
+    changes = mt->changes;
+
+    if (changes) {
+        ovs_assert(changes->transaction == transaction);
+        if (--changes->n_refs == 0) {
+            ovsdb_monitor_changes_destroy_rows(changes);
+            free(changes);
+            mt->changes = NULL;
+        }
+    }
+}
+
+/* Start tracking changes to table 'mt' begins from 'transaction' inclusive.
+ */
+static void
+ovsdb_monitor_table_track_changes(struct ovsdb_monitor_table *mt,
+                                  uint64_t transaction)
+{
+    struct ovsdb_monitor_changes *changes;
+
+    changes = mt->changes;
+    if (changes) {
+        ovs_assert(false);
+    } else {
+        ovsdb_monitor_table_add_changes(mt, transaction);
+    }
+}
+
+static void
+ovsdb_monitor_changes_destroy_rows(struct ovsdb_monitor_changes *changes)
+{
+    struct ovsdb_monitor_row *row, *next;
+
+    HMAP_FOR_EACH_SAFE (row, next, hmap_node, &changes->rows) {
+        hmap_remove(&changes->rows, &row->hmap_node);
+        ovsdb_monitor_row_destroy(changes->mt, row);
+    }
+    hmap_destroy(&changes->rows);
 }
 
 /* Returns JSON for a <row-update> (as described in RFC 7047) for 'row' within
@@ -404,7 +491,11 @@ ovsdb_monitor_compose_update(const struct ovsdb_monitor *dbmon,
         struct ovsdb_monitor_row *row, *next;
         struct json *table_json = NULL;
 
-        HMAP_FOR_EACH_SAFE (row, next, hmap_node, &mt->changes) {
+        if (!mt->changes) {
+            continue;
+        }
+
+        HMAP_FOR_EACH_SAFE (row, next, hmap_node, &mt->changes->rows) {
             struct json *row_json;
 
             row_json = ovsdb_monitor_compose_row_update(
@@ -428,7 +519,7 @@ ovsdb_monitor_compose_update(const struct ovsdb_monitor *dbmon,
                 json_object_put(table_json, uuid, row_json);
             }
 
-            hmap_remove(&mt->changes, &row->hmap_node);
+            hmap_remove(&mt->changes->rows, &row->hmap_node);
             ovsdb_monitor_row_destroy(mt, row);
         }
     }
@@ -495,7 +586,7 @@ ovsdb_monitor_change_cb(const struct ovsdb_row *old,
     change = ovsdb_monitor_row_find(mt, uuid);
     if (!change) {
         change = xmalloc(sizeof *change);
-        hmap_insert(&mt->changes, &change->hmap_node, uuid_hash(uuid));
+        hmap_insert(&mt->changes->rows, &change->hmap_node, uuid_hash(uuid));
         change->uuid = *uuid;
         change->old = clone_monitor_row_data(mt, old);
         change->new = clone_monitor_row_data(mt, new);
@@ -508,7 +599,7 @@ ovsdb_monitor_change_cb(const struct ovsdb_row *old,
 
             if (!change->old) {
                 /* This row was added then deleted.  Forget about it. */
-                hmap_remove(&mt->changes, &change->hmap_node);
+                hmap_remove(&mt->changes->rows, &change->hmap_node);
                 free(change);
             }
         }
@@ -528,6 +619,10 @@ ovsdb_monitor_get_initial(const struct ovsdb_monitor *dbmon)
 
         if (mt->select & OJMS_INITIAL) {
             struct ovsdb_row *row;
+
+            if (!mt->changes) {
+                ovsdb_monitor_table_add_changes(mt, 0);
+            }
 
             HMAP_FOR_EACH (row, hmap_node, &mt->table->rows) {
                 ovsdb_monitor_change_cb(NULL, row, NULL, &aux);
@@ -563,6 +658,20 @@ ovsdb_monitor_remove_jsonrpc_monitor(struct ovsdb_monitor *dbmon,
     ovs_assert(true);
 }
 
+void
+ovsdb_monitor_renew_tracking_changes(struct ovsdb_monitor *dbmon,
+                                     uint64_t prev_txn, uint64_t next_txn)
+{
+    struct shash_node *node;
+
+    SHASH_FOR_EACH (node, &dbmon->tables) {
+        struct ovsdb_monitor_table *mt = node->data;
+
+        ovsdb_monitor_table_untrack_changes(mt, prev_txn);
+        ovsdb_monitor_table_track_changes(mt, next_txn);
+    }
+}
+
 static void
 ovsdb_monitor_destroy(struct ovsdb_monitor *dbmon)
 {
@@ -572,14 +681,8 @@ ovsdb_monitor_destroy(struct ovsdb_monitor *dbmon)
 
     SHASH_FOR_EACH (node, &dbmon->tables) {
         struct ovsdb_monitor_table *mt = node->data;
-        struct ovsdb_monitor_row *row, *next;
 
-        HMAP_FOR_EACH_SAFE (row, next, hmap_node, &mt->changes) {
-            hmap_remove(&mt->changes, &row->hmap_node);
-            ovsdb_monitor_row_destroy(mt, row);
-        }
-        hmap_destroy(&mt->changes);
-
+        ovsdb_monitor_changes_destroy_rows(mt->changes);
         free(mt->columns);
         free(mt);
     }

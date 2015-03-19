@@ -57,4 +57,7 @@ bool ovsdb_monitor_needs_flush(struct ovsdb_monitor *dbmon,
                                uint64_t next_transaction);
 
 void ovsdb_monitor_get_initial(const struct ovsdb_monitor *dbmon);
+
+void ovsdb_monitor_renew_tracking_changes(struct ovsdb_monitor *dbmon,
+                                     uint64_t prev_txn, uint64_t next_txn);
 #endif

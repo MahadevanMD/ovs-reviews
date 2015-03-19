@@ -1280,11 +1280,19 @@ ovsdb_jsonrpc_monitor_remove_all(struct ovsdb_jsonrpc_session *s)
 }
 
 static struct json *
-ovsdb_jsonrpc_monitor_compose_update(
-    struct ovsdb_jsonrpc_monitor *monitor, bool initial)
+ovsdb_jsonrpc_monitor_compose_update(struct ovsdb_jsonrpc_monitor *m,
+                                     bool initial)
 {
-    return ovsdb_monitor_compose_update(monitor->dbmon, initial,
-                                        &monitor->unflushed);
+    uint64_t unflushed;
+    struct json *json;
+
+    unflushed = initial ? 0 : m->unflushed;
+
+    json = ovsdb_monitor_compose_update(m->dbmon, initial,
+                                        &m->unflushed);
+    ovsdb_monitor_renew_tracking_changes(m->dbmon, unflushed, m->unflushed);
+
+    return json;
 }
 
 static bool
