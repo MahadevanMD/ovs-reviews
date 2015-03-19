@@ -88,7 +88,7 @@ static struct jsonrpc_msg *ovsdb_jsonrpc_monitor_cancel(
 static void ovsdb_jsonrpc_monitor_remove_all(struct ovsdb_jsonrpc_session *);
 static void ovsdb_jsonrpc_monitor_flush_all(struct ovsdb_jsonrpc_session *);
 static bool ovsdb_jsonrpc_monitor_needs_flush(struct ovsdb_jsonrpc_session *);
-static struct json *ovsdb_jsonrpc_monitor_compose_table_update(
+static struct json *ovsdb_jsonrpc_monitor_compose_update(
     struct ovsdb_jsonrpc_monitor *monitor, bool initial);
 
 
@@ -1234,7 +1234,7 @@ ovsdb_jsonrpc_monitor_create(struct ovsdb_jsonrpc_session *s, struct ovsdb *db,
     }
 
     ovsdb_monitor_get_initial(m->dbmon);
-    json = ovsdb_jsonrpc_monitor_compose_table_update(m, true);
+    json = ovsdb_jsonrpc_monitor_compose_update(m, true);
     return json ? json : json_object_create();
 
 error:
@@ -1280,11 +1280,11 @@ ovsdb_jsonrpc_monitor_remove_all(struct ovsdb_jsonrpc_session *s)
 }
 
 static struct json *
-ovsdb_jsonrpc_monitor_compose_table_update(
+ovsdb_jsonrpc_monitor_compose_update(
     struct ovsdb_jsonrpc_monitor *monitor, bool initial)
 {
-    return ovsdb_monitor_compose_table_update(monitor->dbmon, initial,
-                                      &monitor->unflushed);
+    return ovsdb_monitor_compose_update(monitor->dbmon, initial,
+                                        &monitor->unflushed);
 }
 
 static bool
@@ -1309,7 +1309,7 @@ ovsdb_jsonrpc_monitor_flush_all(struct ovsdb_jsonrpc_session *s)
     HMAP_FOR_EACH (m, node, &s->monitors) {
         struct json *json;
 
-        json = ovsdb_jsonrpc_monitor_compose_table_update(m, false);
+        json = ovsdb_jsonrpc_monitor_compose_update(m, false);
         if (json) {
             struct jsonrpc_msg *msg;
             struct json *params;
