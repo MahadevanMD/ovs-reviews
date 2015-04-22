@@ -415,7 +415,7 @@ build_pipeline(struct northd_context *ctx)
 
     /* Table 3: Egress port security. */
     NBREC_LOGICAL_PORT_FOR_EACH (lport, ctx->ovnnb_idl) {
-        struct ds match, actions;
+        struct ds match;
 
         ds_init(&match);
         ds_put_cstr(&match, "outport == ");
@@ -424,15 +424,8 @@ build_pipeline(struct northd_context *ctx)
                             lport->port_security, lport->n_port_security,
                             &match);
 
-        ds_init(&actions);
-        ds_put_cstr(&actions, "output(");
-        json_string_escape(lport->name, &actions);
-        ds_put_cstr(&actions, ");");
+        pipeline_add(&pc, lport->lswitch, 3, 50, ds_cstr(&match), "output;");
 
-        pipeline_add(&pc, lport->lswitch, 3, 50,
-                     ds_cstr(&match), ds_cstr(&actions));
-
-        ds_destroy(&actions);
         ds_destroy(&match);
     }
 
