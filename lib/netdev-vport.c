@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1143,7 +1143,7 @@ netdev_vxlan_pop_header(struct dp_packet *packet)
     struct flow_tnl *tnl = &md->tunnel;
     struct vxlanhdr *vxh;
 
-    memset(md, 0, sizeof *md);
+    memset(&md->tunnel, 0, sizeof md->tunnel);
     if (VXLAN_HLEN > dp_packet_size(packet)) {
         return EINVAL;
     }
