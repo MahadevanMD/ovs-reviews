@@ -1686,9 +1686,13 @@ port_construct(struct ofport *port_)
     port->odp_port = dpif_port.port_no;
 
     if (netdev_get_tunnel_config(netdev)) {
+        error = tnl_port_add(port, port->up.netdev, port->odp_port,
+                             ovs_native_tunneling_is_on(ofproto), namebuf);
+        if (error) {
+            return error;
+        }
+
         atomic_count_inc(&ofproto->backer->tnl_count);
-        tnl_port_add(port, port->up.netdev, port->odp_port,
-                     ovs_native_tunneling_is_on(ofproto), namebuf);
         port->is_tunnel = true;
         if (ofproto->ipfix) {
            dpif_ipfix_add_tunnel_port(ofproto->ipfix, port_, port->odp_port);
