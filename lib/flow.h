@@ -586,7 +586,53 @@ bool miniflow_equal_flow_in_minimask(const struct miniflow *a,
                                      const struct flow *b,
                                      const struct minimask *);
 uint32_t miniflow_hash_5tuple(const struct miniflow *flow, uint32_t basis);
+
+/* A data structure for efficiently building a miniflow. */
+struct miniflow_builder {
+    struct flow flow;
+    uint64_t map;
+};
 
+static inline void
+miniflow_builder_init(struct miniflow_builder *b)
+{
+    b->map = 0;
+}
+
+void miniflow_builder_to_miniflow(struct miniflow_builder *,
+                                  struct miniflow *);
+
+static inline void ALWAYS_INLINE
+miniflow_builder_put_uninit__(struct miniflow_builder *mfb,
+                              size_t ofs0, size_t ofs1)
+{
+    uint64_t *mfb_flow_u64 = (uint64_t *) &mfb->flow;
+    for (size_t ofs = ROUND_DOWN(ofs0, 8); ofs < ofs1; ofs += 8) {
+        size_t elem = ofs / 8;
+        uint64_t bit = UINT64_C(1) << elem;
+
+        if (!(mfb->map & bit)) {
+            mfb_flow_u64[elem] = 0;
+        }
+        mfb->map |= bit;
+    }
+}
+#define MINIFLOW_BUILDER_PUT_UNINIT(MFB, FIELD)                         \
+    (miniflow_builder_put_uninit__(                                     \
+        (MFB),                                                          \
+        offsetof(struct flow, FIELD),                                   \
+        offsetof(struct flow, FIELD) + MEMBER_SIZEOF(struct flow, FIELD)), \
+     &(MFB)->flow.FIELD)
+#define MINIFLOW_BUILDER_PUT(MFB, FIELD, VALUE)                         \
+    (*MINIFLOW_BUILDER_PUT_UNINIT(MFB, FIELD) = (VALUE),                \
+     (void) 0)
+#define MINIFLOW_BUILDER_PUT_ARRAY(MFB, FIELD, COUNT)                   \
+    (miniflow_builder_put_uninit__(                                     \
+        (MFB),                                                          \
+        offsetof(struct flow, FIELD),                                   \
+        (offsetof(struct flow, FIELD)  \
+         + (COUNT) * MEMBER_SIZEOF(struct flow, FIELD[0]))),    \
+     (MFB)->flow.FIELD)
 
 /* Compressed flow wildcards. */
 
