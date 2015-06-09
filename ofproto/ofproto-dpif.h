@@ -98,6 +98,8 @@ struct dpif_backer_support {
     bool ufid;
 };
 
+const char *ofproto_dpif_get_name(const struct ofproto_dpif *);
+
 size_t ofproto_dpif_get_max_mpls_depth(const struct ofproto_dpif *);
 bool ofproto_dpif_get_enable_recirc(const struct ofproto_dpif *);
 bool ofproto_dpif_get_enable_ufid(struct dpif_backer *backer);
@@ -126,6 +128,9 @@ static inline bool rule_dpif_is_table_miss(const struct rule_dpif *);
 static inline bool rule_dpif_is_internal(const struct rule_dpif *);
 
 uint8_t rule_dpif_get_table(const struct rule_dpif *);
+const char *rule_dpif_get_trace_explanation(const struct ofproto_dpif *,
+                                            const struct rule_dpif *);
+const struct cls_rule *rule_dpif_get_cls_rule(const struct rule_dpif *);
 
 bool table_is_internal(uint8_t table_id);
 
