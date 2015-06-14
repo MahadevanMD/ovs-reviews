@@ -1200,7 +1200,9 @@ netdev_geneve_pop_header(struct dp_packet *packet)
     struct genevehdr *gnh;
     unsigned int hlen;
 
+    int mark = md->pkt_mark;
     memset(md, 0, sizeof *md);
+    md->pkt_mark = mark;
     if (GENEVE_BASE_HLEN > dp_packet_size(packet)) {
         VLOG_WARN_RL(&err_rl, "geneve packet too small: min header=%u packet size=%u\n",
                      (unsigned int)GENEVE_BASE_HLEN, dp_packet_size(packet));
