@@ -214,8 +214,8 @@ ldp_run(struct controller_ctx *ctx)
         simap_clear(&ldp->ports);
     }
 
-    const struct sbrec_binding *binding;
-    SBREC_BINDING_FOR_EACH (binding, ctx->ovnsb_idl) {
+    const struct sbrec_port_binding *binding;
+    SBREC_PORT_BINDING_FOR_EACH (binding, ctx->ovnsb_idl) {
         struct logical_datapath *ldp;
 
         ldp = ldp_lookup(&binding->logical_datapath);
