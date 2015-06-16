@@ -125,13 +125,6 @@ physical_run(struct controller_ctx *ctx)
             }
         }
 
-        /* Translate the logical datapath into the form we use in
-         * MFF_METADATA. */
-        uint32_t ldp = ldp_to_integer(&binding->logical_datapath);
-        if (!ldp) {
-            continue;
-        }
-
         struct match match;
         if (local) {
             /*
@@ -158,7 +151,7 @@ physical_run(struct controller_ctx *ctx)
             /* Set MFF_METADATA. */
             struct ofpact_set_field *sf = ofpact_put_SET_FIELD(&ofpacts);
             sf->field = mf_from_id(MFF_METADATA);
-            sf->value.be64 = htonll(ldp);
+            sf->value.be64 = htonll(binding->logical_datapath->tunnel_key);
             sf->mask.be64 = OVS_BE64_MAX;
 
             /* Set MFF_LOG_INPORT. */

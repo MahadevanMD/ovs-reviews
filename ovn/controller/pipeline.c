@@ -135,19 +135,12 @@ symtab_init(void)
 
 /* A logical datapath.
  *
- * 'uuid' is the UUID that represents the logical datapath in the OVN_SB
- * database.
- *
- * 'integer' represents the logical datapath as an integer value that is unique
- * only within the local hypervisor.  Because of its size, this value is more
- * practical for use in an OpenFlow flow table than a UUID.
- *
  * 'ports' maps 'logical_port' names to 'tunnel_key' values in the OVN_SB
  * Binding table within the logical datapath. */
 struct logical_datapath {
     struct hmap_node hmap_node; /* Indexed on 'uuid'. */
-    struct uuid uuid;           /* The logical_datapath's UUID. */
-    uint32_t integer;           /* Locally unique among logical datapaths. */
+    struct uuid uuid;           /* UUID from Datapath_Binding row. */
+    uint32_t tunnel_key;        /* 'tunnel_key' from Datapath_Binding row. */
     struct simap ports;         /* Logical port name to port number. */
 };
 
@@ -157,41 +150,29 @@ static struct hmap logical_datapaths = HMAP_INITIALIZER(&logical_datapaths);
 /* Finds and returns the logical_datapath with the given 'uuid', or NULL if
  * no such logical_datapath exists. */
 static struct logical_datapath *
-ldp_lookup(const struct uuid *uuid)
+ldp_lookup(const struct sbrec_datapath_binding *binding)
 {
     struct logical_datapath *ldp;
-    HMAP_FOR_EACH_IN_BUCKET (ldp, hmap_node, uuid_hash(uuid),
+    HMAP_FOR_EACH_IN_BUCKET (ldp, hmap_node, uuid_hash(&binding->header_.uuid),
                              &logical_datapaths) {
-        if (uuid_equals(&ldp->uuid, uuid)) {
+        if (uuid_equals(&ldp->uuid, &binding->header_.uuid)) {
             return ldp;
         }
     }
     return NULL;
 }
 
-/* Finds and returns the integer value corresponding to the given 'uuid', or 0
- * if no such logical datapath exists. */
-uint32_t
-ldp_to_integer(const struct uuid *logical_datapath)
-{
-    const struct logical_datapath *ldp = ldp_lookup(logical_datapath);
-    return ldp ? ldp->integer : 0;
-}
-
 /* Creates a new logical_datapath with the given 'uuid'. */
 static struct logical_datapath *
-ldp_create(const struct uuid *uuid)
+ldp_create(const struct sbrec_datapath_binding *binding)
 {
-    static uint32_t next_integer = 1;
     struct logical_datapath *ldp;
 
-    /* We don't handle the case where the logical datapaths wrap around. */
-    ovs_assert(next_integer);
-
     ldp = xmalloc(sizeof *ldp);
-    hmap_insert(&logical_datapaths, &ldp->hmap_node, uuid_hash(uuid));
-    ldp->uuid = *uuid;
-    ldp->integer = next_integer++;
+    hmap_insert(&logical_datapaths, &ldp->hmap_node,
+                uuid_hash(&binding->header_.uuid));
+    ldp->uuid = binding->header_.uuid;
+    ldp->tunnel_key = binding->tunnel_key;
     simap_init(&ldp->ports);
     return ldp;
 }
@@ -204,8 +185,9 @@ ldp_free(struct logical_datapath *ldp)
     free(ldp);
 }
 
-/* Iterates through all of the records in the Binding table, updating the
- * table of logical_datapaths to match the values found in active Bindings. */
+/* Iterates through all of the records in the Port_Binding table, updating the
+ * table of logical_datapaths to match the values found in active
+ * Port_Bindings. */
 static void
 ldp_run(struct controller_ctx *ctx)
 {
@@ -218,9 +200,9 @@ ldp_run(struct controller_ctx *ctx)
     SBREC_PORT_BINDING_FOR_EACH (binding, ctx->ovnsb_idl) {
         struct logical_datapath *ldp;
 
-        ldp = ldp_lookup(&binding->logical_datapath);
+        ldp = ldp_lookup(binding->logical_datapath);
         if (!ldp) {
-            ldp = ldp_create(&binding->logical_datapath);
+            ldp = ldp_create(binding->logical_datapath);
         }
 
         simap_put(&ldp->ports, binding->logical_port, binding->tunnel_key);
@@ -268,7 +250,7 @@ pipeline_run(struct controller_ctx *ctx)
          * ports are bound to that logical datapath, so there's no point in
          * maintaining any flows for it anyway, so skip it. */
         const struct logical_datapath *ldp;
-        ldp = ldp_lookup(&pipeline->logical_datapath);
+        ldp = ldp_lookup(pipeline->logical_datapath);
         if (!ldp) {
             continue;
         }
@@ -322,7 +304,7 @@ pipeline_run(struct controller_ctx *ctx)
         /* Prepare the OpenFlow matches for adding to the flow table. */
         struct expr_match *m;
         HMAP_FOR_EACH (m, hmap_node, &matches) {
-            match_set_metadata(&m->match, htonll(ldp->integer));
+            match_set_metadata(&m->match, htonll(ldp->tunnel_key));
             if (m->match.wc.masks.conj_id) {
                 m->match.flow.conj_id += conj_id_ofs;
             }

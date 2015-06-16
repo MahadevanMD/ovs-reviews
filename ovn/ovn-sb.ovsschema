@@ -34,7 +34,8 @@
                                               "max": "unlimited"}}}},
         "Pipeline": {
             "columns": {
-                "logical_datapath": {"type": "uuid"},
+                "logical_datapath": {"type": {"key": {"type": "uuid",
+                                                      "refTable": "Datapath_Binding"}}},
                 "table_id": {"type": {"key": {"type": "integer",
                                               "minInteger": 0,
                                               "maxInteger": 31}}},
@@ -44,14 +45,32 @@
                 "match": {"type": "string"},
                 "actions": {"type": "string"}},
             "isRoot": true},
-        "Port_Binding": {
+        "Multicast_Group": {
+            "columns": {
+                "logical_datapath": {"type": {"key": {"type": "uuid",
+                                                      "refTable": "Datapath_Binding"}}},
+                "multicast_group": {"type": "string"},
+                "logical_port": {"type": {"key": {"type": "uuid",
+                                                  "refTable": "Port_Binding"}}}},
+            "isRoot": true},
+        "Datapath_Binding": {
             "columns": {
                 "logical_datapath": {"type": "uuid"},
+                "tunnel_key": {
+                     "type": {"key": {"type": "integer",
+                                      "minInteger": 1,
+                                      "maxInteger": 16777215}}}},
+            "indexes": [["logical_datapath"], ["tunnel_key"]],
+            "isRoot": true},
+        "Port_Binding": {
+            "columns": {
+                "logical_datapath": {"type": {"key": {"type": "uuid",
+                                                      "refTable": "Datapath_Binding"}}},
                 "logical_port": {"type": "string"},
                 "tunnel_key": {
                      "type": {"key": {"type": "integer",
                                       "minInteger": 1,
-                                      "maxInteger": 65535}}},
+                                      "maxInteger": 32767}}},
                 "parent_port": {"type": {"key": "string", "min": 0, "max": 1}},
                 "tag": {
                      "type": {"key": {"type": "integer",
@@ -65,6 +84,6 @@
                 "mac": {"type": {"key": "string",
                                  "min": 0,
                                  "max": "unlimited"}}},
-            "indexes": [["logical_port"], ["tunnel_key"]],
+            "indexes": [["logical_port"], ["logical_datapath", "tunnel_key"]],
             "isRoot": true}},
     "version": "1.0.0"}

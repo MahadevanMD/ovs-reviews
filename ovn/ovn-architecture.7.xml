@@ -98,7 +98,7 @@
         OVN/CMS Plugin.  The database schema is meant to be ``impedance
         matched'' with the concepts used in a CMS, so that it directly supports
         notions of logical switches, routers, ACLs, and so on.  See
-        <code>ovs-nb</code>(5) for details.
+        <code>ovn-nb</code>(5) for details.
       </p>
 
       <p>
@@ -597,7 +597,31 @@
 
   <h1>Design Decisions</h1>
 
-  <h2>Supported Tunnel Encapsulations</h2>
+  <h2>Tunnel Encapsulations</h2>
+
+  <p>
+    OVN annotates logical network packets that it sends from one hypervisor to
+    another with three pieces of metadata:
+  </p>
+
+  <ul>
+    <li>
+      The logical datapath identifier.
+    </li>
+  </ul>
+
+  <p>
+    For STT, tunnel IDs are encoded as follows:
+  </p>
+
+  <diagram>
+    <header name="">
+      <bits name="reserved" above="9" width=".5"/>
+      <bits name="VNI" above="24" width="1.25"/>
+      <bits name="ingress port" above="15" width=".75"/>
+      <bits name="egress port" above="16" width=".75"/>
+    </header>
+  </diagram>
   <p>
     For connecting hypervisors to each other, the only supported tunnel
     encapsulations are Geneve and STT. Hypervisors may use VXLAN to
@@ -648,4 +672,5 @@
     encapsulations with large amounts of metadata may continue to have a
     reduced feature set.
   </p>
+
 </manpage>

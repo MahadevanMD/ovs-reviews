@@ -159,9 +159,9 @@ pipeline_hash(const struct uuid *logical_datapath, uint8_t table_id,
 static size_t
 pipeline_hash_rec(const struct sbrec_pipeline *pipeline)
 {
-    return pipeline_hash(&pipeline->logical_datapath, pipeline->table_id,
-                         pipeline->priority, pipeline->match,
-                         pipeline->actions);
+    return pipeline_hash(&pipeline->logical_datapath->header_.uuid,
+                         pipeline->table_id, pipeline->priority,
+                         pipeline->match, pipeline->actions);
 }
 
 /* Adds a row with the specified contents to the Pipeline table. */
@@ -182,7 +182,7 @@ pipeline_add(struct pipeline_ctx *ctx,
                                            table_id, priority, match, actions),
                              &ctx->pipeline_hmap) {
         const struct sbrec_pipeline *pipeline = hash_node->pipeline;
-        if (uuid_equals(&pipeline->logical_datapath,
+        if (uuid_equals(&pipeline->logical_datapath->header_.uuid,
                         &logical_datapath->header_.uuid)
             && pipeline->table_id == table_id
             && pipeline->priority == priority
@@ -197,8 +197,7 @@ pipeline_add(struct pipeline_ctx *ctx,
     /* No such Pipeline row.  Add one. */
     const struct sbrec_pipeline *pipeline;
     pipeline = sbrec_pipeline_insert(ctx->ovnsb_txn);
-    sbrec_pipeline_set_logical_datapath(pipeline,
-                                        logical_datapath->header_.uuid);
+    sbrec_pipeline_set_logical_datapath(pipeline, NULL /* XXX */);
     sbrec_pipeline_set_table_id(pipeline, table_id);
     sbrec_pipeline_set_priority(pipeline, priority);
     sbrec_pipeline_set_match(pipeline, match);
@@ -455,43 +454,194 @@ tags_equal(const struct sbrec_port_binding *binding,
     return binding->n_tag ? (binding->tag[0] == lport->tag[0]) : true;
 }
 
-struct port_binding_hash_node {
-    struct hmap_node lp_node; /* In 'lp_map', by binding->logical_port. */
-    struct hmap_node tk_node; /* In 'tk_map', by binding->tunnel_key. */
-    const struct sbrec_port_binding *binding;
+struct ovn_port {
+    struct hmap_node key_node;  /* Index on 'key'. */
+    const char *key;            /* nb->name and sb->logical_port */
+
+    const struct nbrec_logical_port *nb; /* May be NULL. */
+    const struct sbrec_port_binding *sb; /* May be NULL. */
+
+    struct ovs_list list;       /* In list of similar records. */
 };
 
-static bool
-tunnel_key_in_use(const struct hmap *tk_hmap, uint16_t tunnel_key)
+static struct ovn_port *
+find_port_by_name(struct hmap *name_map, const char *name)
 {
-    const struct port_binding_hash_node *hash_node;
+    struct ovn_port *op;
 
-    HMAP_FOR_EACH_IN_BUCKET (hash_node, tk_node, hash_int(tunnel_key, 0),
-                             tk_hmap) {
-        if (hash_node->binding->tunnel_key == tunnel_key) {
+    HMAP_FOR_EACH_WITH_HASH (op, key_node, hash_string(name, 0), name_map) {
+        if (!strcmp(op->key, name)) {
+            return op;
+        }
+    }
+    return NULL;
+}
+
+static struct ovn_port *
+ovn_port_create(struct hmap *name_map, const struct nbrec_logical_port *nb,
+                const struct sbrec_port_binding *sb)
+{
+    struct ovn_port *op = xzalloc(sizeof *op);
+    op->key = nb ? nb->name : sb->logical_port;
+    op->sb = sb;
+    op->nb = nb;
+    hmap_insert(name_map, &op->key_node, hash_string(op->key, 0));
+    return op;
+}
+
+static void
+join_logical_ports(struct northd_context *ctx, struct hmap *name_map,
+                   struct ovs_list *sb_only, struct ovs_list *nb_only,
+                   struct ovs_list *both)
+{
+    hmap_init(name_map);
+    list_init(sb_only);
+    list_init(nb_only);
+    list_init(both);
+
+    const struct sbrec_port_binding *sb;
+    SBREC_PORT_BINDING_FOR_EACH (sb, ctx->ovnsb_idl) {
+        struct ovn_port *op = ovn_port_create(name_map, NULL, sb);
+        list_push_back(sb_only, &op->list);
+    }
+
+    const struct nbrec_logical_port *nb;
+    NBREC_LOGICAL_PORT_FOR_EACH (nb, ctx->ovnnb_idl) {
+        struct ovn_port *op = find_port_by_name(name_map, nb->name);
+        if (op) {
+            op->nb = nb;
+            list_remove(&op->list);
+            list_push_back(both, &op->list);
+        } else {
+            op = ovn_port_create(name_map, nb, NULL);
+            list_push_back(nb_only, &op->list);
+        }
+    }
+}
+
+struct ovn_datapath {
+    struct hmap_node key_node;  /* Index on 'key'. */
+    struct uuid key;            /* nb->header_.uuid and sb->logical_switch. */
+
+    const struct nbrec_logical_switch *nb;   /* May be NULL. */
+    const struct sbrec_datapath_binding *sb; /* May be NULL. */
+
+    struct ovs_list list;       /* In list of similar records. */
+
+    struct hmap port_keys;
+    uint32_t max_port_key;
+};
+
+static struct ovn_datapath *
+find_datapath_by_uuid(struct hmap *uuid_map, const struct uuid *uuid)
+{
+    struct ovn_datapath *od;
+
+    HMAP_FOR_EACH_WITH_HASH (od, key_node, uuid_hash(uuid), uuid_map) {
+        if (uuid_equals(uuid, &od->key)) {
+            return od;
+        }
+    }
+    return NULL;
+}
+
+static void
+join_datapaths(struct northd_context *ctx, struct hmap *uuid_map,
+               struct ovs_list *sb_only, struct ovs_list *nb_only,
+               struct ovs_list *both)
+{
+    hmap_init(uuid_map);
+    list_init(sb_only);
+    list_init(nb_only);
+    list_init(both);
+
+    const struct sbrec_datapath_binding *sb;
+    SBREC_DATAPATH_BINDING_FOR_EACH (sb, ctx->ovnsb_idl) {
+        struct ovn_datapath *od = xzalloc(sizeof *od);
+        od->key = sb->logical_datapath;
+        od->sb = sb;
+        od->nb = NULL;
+        hmap_init(&od->port_keys);
+        od->max_port_key = 0;
+        hmap_insert(uuid_map, &od->key_node, uuid_hash(&od->key));
+        list_push_back(sb_only, &od->list);
+    }
+
+    const struct nbrec_logical_switch *nb;
+    NBREC_LOGICAL_SWITCH_FOR_EACH (nb, ctx->ovnnb_idl) {
+        struct ovn_datapath *od = find_datapath_by_uuid(uuid_map,
+                                                        &nb->header_.uuid);
+        if (od) {
+            od->nb = nb;
+            list_remove(&od->list);
+            list_push_back(both, &od->list);
+        } else {
+            od = xzalloc(sizeof *od);
+            od->key = nb->header_.uuid;
+            od->sb = NULL;
+            od->nb = nb;
+            hmap_init(&od->port_keys);
+            od->max_port_key = 0;
+            hmap_insert(uuid_map, &od->key_node, uuid_hash(&od->key));
+            list_push_back(nb_only, &od->list);
+        }
+    }
+}
+
+struct key_node {
+    struct hmap_node hmap_node;
+    uint32_t key;
+};
+
+static void
+add_key(struct hmap *set, uint32_t key)
+{
+    struct key_node *node = xmalloc(sizeof *node);
+    hmap_insert(set, &node->hmap_node, hash_int(key, 0));
+    node->key = key;
+}
+
+static bool
+key_in_use(const struct hmap *set, uint32_t key)
+{
+    const struct key_node *node;
+    HMAP_FOR_EACH_IN_BUCKET (node, hmap_node, hash_int(key, 0), set) {
+        if (node->key == key) {
             return true;
         }
     }
     return false;
 }
 
-/* Chooses and returns a positive tunnel key that is not already in use in
- * 'tk_hmap'.  Returns 0 if all tunnel keys are in use. */
-static uint16_t
-choose_tunnel_key(const struct hmap *tk_hmap)
+static uint32_t
+allocate_key(struct hmap *set, const char *name, uint32_t max, uint32_t *prev)
 {
-    static uint16_t prev;
-
-    for (uint16_t key = prev + 1; key != prev; key++) {
-        if (!tunnel_key_in_use(tk_hmap, key)) {
-            prev = key;
+    for (uint32_t key = *prev + 1; key != *prev;
+         key = key + 1 <= max ? key + 1 : 1) {
+        if (!key_in_use(set, key)) {
+            add_key(set, key);
+            *prev = key;
             return key;
         }
     }
 
     static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
-    VLOG_WARN_RL(&rl, "all tunnel keys exhausted");
+    VLOG_WARN_RL(&rl, "all %s tunnel keys exhausted", name);
     return 0;
+}
+
+static uint32_t
+allocate_datapath_key(struct hmap *dp_keys)
+{
+    static uint32_t prev;
+    return allocate_key(dp_keys, "datapath", (1u << 24) - 1, &prev);
+}
+
+static uint32_t
+allocate_port_key(struct ovn_datapath *dj)
+{
+    return allocate_key(&dj->port_keys, "port",
+                        (1u << 16) - 1, &dj->max_port_key);
 }
 
 /*
@@ -501,123 +651,105 @@ choose_tunnel_key(const struct hmap *tk_hmap)
  * OVN_Northbound database.
  */
 static void
-set_port_bindings(struct northd_context *ctx)
+build_bindings(struct northd_context *ctx)
 {
-    const struct sbrec_port_binding *binding;
-    const struct nbrec_logical_port *lport;
+    struct ovs_list sb_dps, nb_dps, both_dps;
+    struct hmap dp_map;
 
-    /*
-     * We will need to look up a port binding for every logical port.  We don't
-     * want to have to do an O(n) search for every binding, so start out by
-     * hashing them on the logical port.
-     *
-     * As we go through every logical port, we will update the binding if it
-     * exists or create one otherwise.  When the update is done, we'll remove
-     * it from the hashmap.  At the end, any bindings left in the hashmap are
-     * for logical ports that have been deleted.
-     *
-     * We index the logical_port column because that's the shared key between
-     * the OVN_NB and OVN_SB databases.  We index the tunnel_key column to
-     * allow us to choose a unique tunnel key for any Port_Binding rows we have
-     * to add.
-     */
-    struct hmap lp_hmap = HMAP_INITIALIZER(&lp_hmap);
-    struct hmap tk_hmap = HMAP_INITIALIZER(&tk_hmap);
+    join_datapaths(ctx, &dp_map, &sb_dps, &nb_dps, &both_dps);
 
-    SBREC_PORT_BINDING_FOR_EACH(binding, ctx->ovnsb_idl) {
-        struct port_binding_hash_node *hash_node = xzalloc(sizeof *hash_node);
-        hash_node->binding = binding;
-        hmap_insert(&lp_hmap, &hash_node->lp_node,
-                    hash_string(binding->logical_port, 0));
-        hmap_insert(&tk_hmap, &hash_node->tk_node,
-                    hash_int(binding->tunnel_key, 0));
-    }
+    if (!list_is_empty(&nb_dps)) {
+        /* First index the in-use datapath tunnel keys. */
+        struct hmap dp_keys = HMAP_INITIALIZER(&dp_keys);
+        struct ovn_datapath *od;
+        LIST_FOR_EACH (od, list, &both_dps) {
+            add_key(&dp_keys, od->sb->tunnel_key);
+        }
 
-    NBREC_LOGICAL_PORT_FOR_EACH(lport, ctx->ovnnb_idl) {
-        struct port_binding_hash_node *hash_node;
-        binding = NULL;
-        HMAP_FOR_EACH_WITH_HASH(hash_node, lp_node,
-                                hash_string(lport->name, 0), &lp_hmap) {
-            if (!strcmp(lport->name, hash_node->binding->logical_port)) {
-                binding = hash_node->binding;
+        /* Add southbound record for each unmatched northbound record. */
+        LIST_FOR_EACH (od, list, &nb_dps) {
+            uint16_t tunnel_key = allocate_datapath_key(&dp_keys);
+            if (!tunnel_key) {
                 break;
             }
+
+            od->sb = sbrec_datapath_binding_insert(ctx->ovnsb_txn);
+            sbrec_datapath_binding_set_logical_datapath(
+                od->sb, od->nb->header_.uuid);
+            sbrec_datapath_binding_set_tunnel_key(od->sb, tunnel_key);
+        }
+    }
+
+    /* Delete southbound records without northbound matches. */
+    struct ovn_datapath *od;
+    LIST_FOR_EACH (od, list, &sb_dps) {
+        sbrec_datapath_binding_delete(od->sb);
+    }
+
+    struct ovs_list sb_ports, nb_ports, both_ports;
+    struct hmap port_map;
+
+    join_logical_ports(ctx, &port_map, &sb_ports, &nb_ports, &both_ports);
+
+    /* For logical ports that are in both databases, update the southbound
+     * record based on northbound data.  Also index the in-use tunnel_keys. */
+    struct ovn_port *op;
+    LIST_FOR_EACH (op, list, &both_ports) {
+        if (!macs_equal(op->sb->mac, op->sb->n_mac,
+                        op->nb->macs, op->nb->n_macs)) {
+            sbrec_port_binding_set_mac(op->sb, (const char **) op->nb->macs,
+                                       op->nb->n_macs);
+        }
+        if (!parents_equal(op->sb, op->nb)) {
+            sbrec_port_binding_set_parent_port(op->sb, op->nb->parent_name);
+        }
+        if (!tags_equal(op->sb, op->nb)) {
+            sbrec_port_binding_set_tag(op->sb, op->nb->tag, op->nb->n_tag);
         }
 
-        struct uuid logical_datapath;
-        if (lport->lswitch) {
-            logical_datapath = lport->lswitch->header_.uuid;
+        od = find_datapath_by_uuid(&dp_map, &op->nb->header_.uuid);
+        if (!od || !od->sb) {
+            /* XXX delete southbound port */
         } else {
-            uuid_zero(&logical_datapath);
-        }
-
-        if (binding) {
-            /* We found an existing binding for this logical port.  Update its
-             * contents. */
-
-            hmap_remove(&lp_hmap, &hash_node->lp_node);
-
-            if (!macs_equal(binding->mac, binding->n_mac,
-                        lport->macs, lport->n_macs)) {
-                sbrec_port_binding_set_mac(binding,
-                        (const char **) lport->macs, lport->n_macs);
+            if (op->sb->logical_datapath != od->sb) {
+                sbrec_port_binding_set_logical_datapath(op->sb, od->sb);
             }
-            if (!parents_equal(binding, lport)) {
-                sbrec_port_binding_set_parent_port(binding,
-                                                   lport->parent_name);
+            add_key(&od->port_keys, op->sb->tunnel_key);
+            if (op->sb->tunnel_key > od->max_port_key) {
+                od->max_port_key = op->sb->tunnel_key;
             }
-            if (!tags_equal(binding, lport)) {
-                sbrec_port_binding_set_tag(binding, lport->tag, lport->n_tag);
-            }
-            if (!uuid_equals(&binding->logical_datapath, &logical_datapath)) {
-                sbrec_port_binding_set_logical_datapath(binding,
-                                                        logical_datapath);
-            }
-        } else {
-            /* There is no binding for this logical port, so create one. */
-
-            uint16_t tunnel_key = choose_tunnel_key(&tk_hmap);
-            if (!tunnel_key) {
-                continue;
-            }
-
-            binding = sbrec_port_binding_insert(ctx->ovnsb_txn);
-            sbrec_port_binding_set_logical_port(binding, lport->name);
-            sbrec_port_binding_set_mac(binding,
-                    (const char **) lport->macs, lport->n_macs);
-            if (lport->parent_name && lport->n_tag > 0) {
-                sbrec_port_binding_set_parent_port(binding,
-                                                   lport->parent_name);
-                sbrec_port_binding_set_tag(binding, lport->tag, lport->n_tag);
-            }
-
-            sbrec_port_binding_set_tunnel_key(binding, tunnel_key);
-            sbrec_port_binding_set_logical_datapath(binding, logical_datapath);
-
-            /* Add the tunnel key to the tk_hmap so that we don't try to use it
-             * for another port.  (We don't want it in the lp_hmap because that
-             * would just get the Port_Binding record deleted later.) */
-            struct port_binding_hash_node *hash_node
-                = xzalloc(sizeof *hash_node);
-            hash_node->binding = binding;
-            hmap_insert(&tk_hmap, &hash_node->tk_node,
-                        hash_int(binding->tunnel_key, 0));
         }
     }
 
-    struct port_binding_hash_node *hash_node;
-    HMAP_FOR_EACH (hash_node, lp_node, &lp_hmap) {
-        hmap_remove(&lp_hmap, &hash_node->lp_node);
-        sbrec_port_binding_delete(hash_node->binding);
-    }
-    hmap_destroy(&lp_hmap);
+    /* Add southbound record for each unmatched northbound record. */
+    LIST_FOR_EACH (op, list, &nb_ports) {
+        od = find_datapath_by_uuid(&dp_map, &op->nb->header_.uuid);
+        if (!od || !od->sb) {
+            continue;
+        }
 
-    struct port_binding_hash_node *hash_node_next;
-    HMAP_FOR_EACH_SAFE (hash_node, hash_node_next, tk_node, &tk_hmap) {
-        hmap_remove(&tk_hmap, &hash_node->tk_node);
-        free(hash_node);
+        uint16_t tunnel_key = allocate_port_key(od);
+        if (!tunnel_key) {
+            continue;
+        }
+
+        op->sb = sbrec_port_binding_insert(ctx->ovnsb_txn);
+        sbrec_port_binding_set_logical_port(op->sb, op->nb->name);
+        sbrec_port_binding_set_mac(op->sb, (const char **) op->nb->macs,
+                                   op->nb->n_macs);
+        if (op->nb->parent_name && op->nb->n_tag > 0) {
+            sbrec_port_binding_set_parent_port(op->sb, op->nb->parent_name);
+            sbrec_port_binding_set_tag(op->sb, op->nb->tag, op->nb->n_tag);
+        }
+
+        sbrec_port_binding_set_tunnel_key(op->sb, tunnel_key);
+        sbrec_port_binding_set_logical_datapath(op->sb, od->sb);
     }
-    hmap_destroy(&tk_hmap);
+
+    /* Delete southbound records without northbound matches. */
+    LIST_FOR_EACH (op, list, &sb_ports) {
+        sbrec_port_binding_delete(op->sb);
+    }
 }
 
 static void
@@ -625,7 +757,7 @@ ovnnb_db_changed(struct northd_context *ctx)
 {
     VLOG_DBG("ovn-nb db contents have changed.");
 
-    set_port_bindings(ctx);
+    build_bindings(ctx);
     build_pipeline(ctx);
 }
 

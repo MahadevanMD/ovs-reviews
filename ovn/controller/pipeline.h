@@ -44,6 +44,4 @@ void pipeline_init(void);
 void pipeline_run(struct controller_ctx *);
 void pipeline_destroy(struct controller_ctx *);
 
-uint32_t ldp_to_integer(const struct uuid *logical_datapath);
-
 #endif /* ovn/pipeline.h */
