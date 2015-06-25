@@ -103,6 +103,28 @@
     contain binding data.
   </p>
 
+  <h2>Common Columns</h2>
+
+  <p>
+    Some tables contain a special column named <code>external_ids</code>.  This
+    column has the same form and purpose each place that it appears, so we
+    describe it here to save space later.
+  </p>
+
+  <dl>
+    <dt><code>external_ids</code>: map of string-string pairs</dt>
+    <dd>
+      Key-value pairs for use by the software that manages the OVN Southbound
+      database rather than by <code>ovn-controller</code>.  In particular,
+      <code>ovn-northd</code> can use key-value pairs in this column to relate
+      entities in the southbound database to higher-level entities (such as
+      entities in the OVN Northbound database).  Individual key-value pairs in
+      this column may be documented in some cases to aid in understanding and
+      troubleshooting, but the reader should not mistake such documentation as
+      comprehensive.
+    </dd>
+  </dl>
+
   <table name="Chassis" title="Physical Network Hypervisor and Gateway Information">
     <p>
       Each row in this table represents a hypervisor or gateway (a chassis) in
@@ -528,10 +550,13 @@
         logical port.  Thus, its value is a <ref column="logical_port"/> names
         from the <ref table="Port_Binding"/> and <ref table="Gateway"/> tables
         in a logical flow's <ref column="logical_datapath"/>.
-        <code>outport</code> names either a logical port, as
-        <code>inport</code>, or a logical multicast group, one of the <ref
-        column="multicast_group"/> names from the <ref
-        table="Multicast_Group"/> table.
+        <code>outport</code> may name a logical port, as <code>inport</code>.
+        It may also name a logical multicast group defined in the <ref
+        table="Multicast_Group"/> table using a name of the form
+        <code>_mc<var>n</var></code> where <var>n</var> is the group's <ref
+        table="Multicast_Group" column="tunnel_key"/>,
+        e.g. <code>_mc32768</code> for the group with <ref
+        table="Multicast_Group" column="tunnel_key"/> 32768.
       </p>
 
       <ul>
@@ -648,16 +673,16 @@
 
     <p>
       Each set of rows in this table with the same <ref
-      column="logical_datapath"/> and <ref column="multicast_group"/> defines a
-      logical multicast group named <ref column="multicast_group"/> within <ref
+      column="logical_datapath"/> and <ref column="tunnel_key"/> defines a
+      logical multicast group numbered <ref column="tunnel_key"/> within <ref
       column="logical_datapath"/>.  Such a multicast group consists of the
       logical ports named in its <ref column="logical_port"/> columns, which
-      must all be in the <ref column="logical_datapath"/> logical datapath
-      (but the database schema cannot enforce this).
+      must all be in the <ref column="logical_datapath"/> logical datapath (but
+      the database schema cannot enforce this).
     </p>
 
     <p>
-      Multicast group names are scoped within a logical datapath.
+      Multicast group numbers are scoped within a logical datapath.
     </p>
 
     <p>
@@ -665,8 +690,12 @@
       thus should not overlap (but the database schema cannot enforce this).
     </p>
 
+    <p>
+      An index prevents this table from containing entirely duplicate rows.
+    </p>
+
     <column name="logical_datapath"/>
-    <column name="multicast_group"/>
+    <column name="tunnel_key"/>
     <column name="logical_port"/>
   </table>
 
@@ -676,8 +705,19 @@
       datapath.
     </p>
 
-    <column name="logical_datapath"/>
-    <column name="tunnel_key"/>
+    <column name="tunnel_key">
+      The tunnel key value to which the logical datapath is bound.
+      The <code>Tunnel Encapsulation</code> section in
+      <code>ovn-architecture</code>(7) describes how tunnel keys are
+      constructed for each supported encapsulation.
+    </column>
+
+    <group title="Common Columns">
+      The overall purpose of these columns is described under <code>Common
+      Columns</code> at the beginning of this document.
+
+      <column name="external_ids"/>
+    </group>
   </table>
 
   <table name="Port_Binding" title="Physical-Logical Port Bindings">
@@ -712,26 +752,17 @@
       <code>chassis</code> column with new information.
     </p>
 
-    <column name="logical_datapath">
-      The logical datapath to which the logical port belongs.  A logical
-      datapath implements a logical pipeline via logical flows in the <ref
-      table="Pipeline"/> table.  (No table represents a logical datapath.)
-    </column>
-
-    <column name="logical_port">
-      A logical port, taken from <ref table="Logical_Port" column="name"
-      db="OVN_Northbound"/> in the OVN_Northbound database's
-      <ref table="Logical_Port" db="OVN_Northbound"/> table.  OVN does not
-      prescribe a particular format for the logical port ID.
+    <column name="datapath">
+      The logical datapath to which the logical port belongs.
     </column>
 
     <column name="tunnel_key">
       <p>
         A number that represents the logical port in the key (e.g. STT key or
-        Geneve TLV) field carried within tunnel protocol packets.  (This avoids
+        Geneve TLV) field carried within tunnel protocol packets.  This avoids
         wasting space for a whole UUID in tunneled packets.  It also allows OVN
         to support encapsulations that cannot fit an entire UUID in their
-        tunnel keys.)
+        tunnel keys (i.e. every encapsulation other than Geneve).
       </p>
 
       <p>
@@ -739,7 +770,7 @@
       </p>
 
       <p>
-        Tunnel IDs form a 16-bit space:
+        Logical port tunnel IDs form a 16-bit space:
       </p>
 
       <ul>
@@ -790,5 +821,12 @@
         add MAC addresses to the set as it learns new source addresses.
       </p>
     </column>
+
+    <group title="Common Columns">
+      The overall purpose of these columns is described under <code>Common
+      Columns</code> at the beginning of this document.
+
+      <column name="external_ids"/>
+    </group>
   </table>
 </database>
