@@ -74,15 +74,16 @@
   </p>
 
   <p>
-    The <ref table="Pipeline"/> table is currently the only LN table.
+    <ref table="Pipeline"/> and <ref table="Multicast_Group"/> contain LN data.
   </p>
 
   <h3>Bindings data</h3>
 
   <p>
-    The Binding tables contain the current placement of logical components
-    (such as VMs and VIFs) onto chassis and the bindings between logical ports
-    and MACs.
+    Bindings data link logical and physical components.  They show the current
+    placement of logical components (such as VMs and VIFs) onto chassis, and
+    map logical entities to the values that represent them in tunnel
+    encapsulations.
   </p>
 
   <p>
@@ -98,8 +99,31 @@
   </p>
 
   <p>
-    The <ref table="Port_Binding"/> table is currently the only binding data.
+    The <ref table="Port_Binding"/> and <ref table="Datapath_Binding"/> tables
+    contain binding data.
   </p>
+
+  <h2>Common Columns</h2>
+
+  <p>
+    Some tables contain a special column named <code>external_ids</code>.  This
+    column has the same form and purpose each place that it appears, so we
+    describe it here to save space later.
+  </p>
+
+  <dl>
+    <dt><code>external_ids</code>: map of string-string pairs</dt>
+    <dd>
+      Key-value pairs for use by the software that manages the OVN Southbound
+      database rather than by <code>ovn-controller</code>.  In particular,
+      <code>ovn-northd</code> can use key-value pairs in this column to relate
+      entities in the southbound database to higher-level entities (such as
+      entities in the OVN Northbound database).  Individual key-value pairs in
+      this column may be documented in some cases to aid in understanding and
+      troubleshooting, but the reader should not mistake such documentation as
+      comprehensive.
+    </dd>
+  </dl>
 
   <table name="Chassis" title="Physical Network Hypervisor and Gateway Information">
     <p>
@@ -449,11 +473,7 @@
 
       <p>
         String constants have the same syntax as quoted strings in JSON (thus,
-        they are Unicode strings).  String constants are used for naming
-        logical ports.  Thus, the useful values are <ref
-        column="logical_port"/> names from the <ref column="Port_Binding"/> and
-        <ref column="Gateway"/> tables in a logical flow's <ref
-	column="logical_datapath"/>.
+        they are Unicode strings).
       </p>
 
       <p>
@@ -524,6 +544,21 @@
 
       <p><em>Symbols</em></p>
 
+      <p>
+        Most of the symbols below have integer type.  Only <code>inport</code>
+        and <code>outport</code> have string type.  <code>inport</code> names a
+        logical port.  Thus, its value is a <ref column="logical_port"/> names
+        from the <ref table="Port_Binding"/> and <ref table="Gateway"/> tables
+        in a logical flow's <ref column="logical_datapath"/>.
+        <code>outport</code> may name a logical port, as <code>inport</code>.
+        It may also name a logical multicast group defined in the <ref
+        table="Multicast_Group"/> table using a name of the form
+        <code>_mc<var>n</var></code> where <var>n</var> is the group's <ref
+        table="Multicast_Group" column="tunnel_key"/>,
+        e.g. <code>_mc32768</code> for the group with <ref
+        table="Multicast_Group" column="tunnel_key"/> 32768.
+      </p>
+
       <ul>
         <li>
           <code>metadata</code> <code>reg0</code> ... <code>reg7</code>
@@ -568,9 +603,9 @@
       <dl>
         <dt><code>output;</code></dt>
         <dd>
-	  Outputs the packet to the logical port current designated by
-	  <code>outport</code>.  Output to the ingress port is implicitly
-	  dropped, that is, <code>output</code> becomes a no-op if
+	  Outputs the packet to the logical port or multicast group currently
+	  designated by <code>outport</code>.  Output to the ingress port is
+	  implicitly dropped, that is, <code>output</code> becomes a no-op if
 	  <code>outport</code> == <code>inport</code>.
 	</dd>
 
@@ -628,6 +663,70 @@
     </column>
   </table>
 
+  <table name="Multicast_Group" title="Logical Port Multicast Groups">
+    <p>
+      The rows in this table define multicast groups of logical ports.
+      Multicast groups allow a single packet transmitted over a tunnel to a
+      hypervisor to be delivered to multiple VMs on that hypervisor, which
+      uses bandwidth more efficiently.
+    </p>
+
+    <p>
+      Each set of rows in this table with the same <ref
+      column="logical_datapath"/> and <ref column="tunnel_key"/> defines a
+      logical multicast group numbered <ref column="tunnel_key"/> within <ref
+      column="logical_datapath"/>.  Such a multicast group consists of the
+      logical ports named in its <ref column="logical_port"/> columns, which
+      must all be in the <ref column="logical_datapath"/> logical datapath (but
+      the database schema cannot enforce this).
+    </p>
+
+    <p>
+      Multicast group numbers are scoped within a logical datapath.
+    </p>
+
+    <p>
+      Multicast group names and logical port names share a single namespace and
+      thus should not overlap (but the database schema cannot enforce this).
+    </p>
+
+    <p>
+      An index prevents this table from containing entirely duplicate rows.
+    </p>
+
+    <column name="logical_datapath"/>
+    <column name="tunnel_key"/>
+    <column name="logical_port"/>
+  </table>
+
+  <table name="Datapath_Binding" title="Physical-Logical Datapath Bindings">
+    <p>
+      Each row in this table identifies physical bindings of a logical
+      datapath.
+    </p>
+
+    <column name="tunnel_key">
+      The tunnel key value to which the logical datapath is bound.
+      The <code>Tunnel Encapsulation</code> section in
+      <code>ovn-architecture</code>(7) describes how tunnel keys are
+      constructed for each supported encapsulation.
+    </column>
+
+    <column name="external_ids" key="logical-switch" type='{"type": "uuid"}'>
+      Each row in <ref table="Datapath_Binding"/> is associated with some
+      logical datapath.  <code>ovn-northd</code> uses this key to store the
+      UUID of the logical datapath <ref table="Logical_Switch"
+      db="OVN_Northbound"/> row in the <ref db="OVN_Northbound"/> database.
+    </column>
+
+    <group title="Common Columns">
+      The overall purpose of these columns is described under <code>Common
+      Columns</code> at the beginning of this document.
+
+      <column name="external_ids"/>
+    </group>
+  </table>
+
   <table name="Port_Binding" title="Physical-Logical Port Bindings">
     <p>
       Each row in this table identifies the physical location of a logical
@@ -660,31 +759,35 @@
       <code>chassis</code> column with new information.
     </p>
 
-    <column name="logical_datapath">
-      The logical datapath to which the logical port belongs.  A logical
-      datapath implements a logical pipeline via logical flows in the <ref
-      table="Pipeline"/> table.  (No table represents a logical datapath.)
-    </column>
-
-    <column name="logical_port">
-      A logical port, taken from <ref table="Logical_Port" column="name"
-      db="OVN_Northbound"/> in the OVN_Northbound database's
-      <ref table="Logical_Port" db="OVN_Northbound"/> table.  OVN does not
-      prescribe a particular format for the logical port ID.
+    <column name="datapath">
+      The logical datapath to which the logical port belongs.
     </column>
 
     <column name="tunnel_key">
       <p>
-        A number that represents the logical port in the key (e.g. VXLAN VNI or
-        STT key) field carried within tunnel protocol packets.  (This avoids
+        A number that represents the logical port in the key (e.g. STT key or
+        Geneve TLV) field carried within tunnel protocol packets.  This avoids
         wasting space for a whole UUID in tunneled packets.  It also allows OVN
         to support encapsulations that cannot fit an entire UUID in their
-        tunnel keys.)
+        tunnel keys (i.e. every encapsulation other than Geneve).
       </p>
 
       <p>
-        Tunnel ID 0 is reserved for internal use within OVN.
+        The tunnel ID must be unique within the scope of a logical datapath.
       </p>
+
+      <p>
+        Logical port tunnel IDs form a 16-bit space:
+      </p>
+
+      <ul>
+        <li>Tunnel ID 0 is reserved for internal use within OVN.</li>
+        <li>Tunnel IDs 1 through 32767, inclusive, may be assigned to logical
+        ports.</li>
+        <li>Tunnel IDs 32768 through 65534, inclusive, may be assigned to
+        logical multicast groups (XXX refer to Multicast table).</li>
+        <li>Tunnel ID 65535 represents logical broadcast.</li>
+      </ul>
     </column>
 
     <column name="parent_port">
@@ -725,5 +828,12 @@
         add MAC addresses to the set as it learns new source addresses.
       </p>
     </column>
+
+    <group title="Common Columns">
+      The overall purpose of these columns is described under <code>Common
+      Columns</code> at the beginning of this document.
+
+      <column name="external_ids"/>
+    </group>
   </table>
 </database>
