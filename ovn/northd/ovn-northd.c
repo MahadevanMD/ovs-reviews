@@ -123,6 +123,48 @@ macs_equal(char **binding_macs_, size_t b_n_macs,
     return (i == b_n_macs) ? true : false;
 }
 
+struct key_node {
+    struct hmap_node hmap_node;
+    uint32_t key;
+};
+
+static void
+add_key(struct hmap *set, uint32_t key)
+{
+    struct key_node *node = xmalloc(sizeof *node);
+    hmap_insert(set, &node->hmap_node, hash_int(key, 0));
+    node->key = key;
+}
+
+static bool
+key_in_use(const struct hmap *set, uint32_t key)
+{
+    const struct key_node *node;
+    HMAP_FOR_EACH_IN_BUCKET (node, hmap_node, hash_int(key, 0), set) {
+        if (node->key == key) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static uint32_t
+allocate_key(struct hmap *set, const char *name, uint32_t max, uint32_t *prev)
+{
+    for (uint32_t key = *prev + 1; key != *prev;
+         key = key + 1 <= max ? key + 1 : 1) {
+        if (!key_in_use(set, key)) {
+            add_key(set, key);
+            *prev = key;
+            return key;
+        }
+    }
+
+    static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+    VLOG_WARN_RL(&rl, "all %s tunnel keys exhausted", name);
+    return 0;
+}
+
 /* The 'key' comes from nb->header_.uuid or sb->external_ids's ' */
 struct ovn_datapath {
     struct hmap_node key_node;  /* Index on 'key'. */
@@ -150,6 +192,179 @@ find_datapath_by_uuid(struct hmap *uuid_map, const struct uuid *uuid)
         }
     }
     return NULL;
+}
+
+static void
+join_datapaths(struct northd_context *ctx, struct hmap *uuid_map,
+               struct ovs_list *sb_only, struct ovs_list *nb_only,
+               struct ovs_list *both)
+{
+    hmap_init(uuid_map);
+    list_init(sb_only);
+    list_init(nb_only);
+    list_init(both);
+
+    const struct sbrec_datapath_binding *sb, *sb_next;
+    SBREC_DATAPATH_BINDING_FOR_EACH_SAFE (sb, sb_next, ctx->ovnsb_idl) {
+        struct uuid key;
+        if (!smap_get_uuid(&sb->external_ids, "logical-switch", &key)) {
+            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
+            VLOG_INFO_RL(&rl, "deleting Datapath_Binding missing "
+                         "external-ids:logical-switch");
+            sbrec_datapath_binding_delete(sb);
+            continue;
+        }
+
+        struct ovn_datapath *od = xzalloc(sizeof *od);
+        od->key = key;
+        od->sb = sb;
+        od->nb = NULL;
+        hmap_init(&od->port_keys);
+        od->max_port_key = 0;
+        hmap_insert(uuid_map, &od->key_node, uuid_hash(&od->key));
+        list_push_back(sb_only, &od->list);
+    }
+
+    const struct nbrec_logical_switch *nb;
+    NBREC_LOGICAL_SWITCH_FOR_EACH (nb, ctx->ovnnb_idl) {
+        struct ovn_datapath *od = find_datapath_by_uuid(uuid_map,
+                                                        &nb->header_.uuid);
+        if (od) {
+            od->nb = nb;
+            list_remove(&od->list);
+            list_push_back(both, &od->list);
+        } else {
+            od = xzalloc(sizeof *od);
+            od->key = nb->header_.uuid;
+            od->sb = NULL;
+            od->nb = nb;
+            hmap_init(&od->port_keys);
+            od->max_port_key = 0;
+            hmap_insert(uuid_map, &od->key_node, uuid_hash(&od->key));
+            list_push_back(nb_only, &od->list);
+        }
+    }
+}
+
+static uint32_t
+allocate_datapath_key(struct hmap *dp_keys)
+{
+    static uint32_t prev;
+    return allocate_key(dp_keys, "datapath", (1u << 24) - 1, &prev);
+}
+
+static uint32_t
+allocate_port_key(struct ovn_datapath *dj)
+{
+    return allocate_key(&dj->port_keys, "port",
+                        (1u << 16) - 1, &dj->max_port_key);
+}
+
+/*
+ * When a change has occurred in the OVN_Northbound database, we go through and
+ * make sure that the contents of the Port_Binding table in the OVN_Southbound
+ * database are up to date with the logical ports defined in the
+ * OVN_Northbound database.
+ */
+static void
+build_bindings(struct northd_context *ctx, struct hmap *dp_map,
+               struct hmap *port_map)
+{
+    struct ovs_list sb_dps, nb_dps, both_dps;
+
+    join_datapaths(ctx, dp_map, &sb_dps, &nb_dps, &both_dps);
+
+    if (!list_is_empty(&nb_dps)) {
+        /* First index the in-use datapath tunnel keys. */
+        struct hmap dp_keys = HMAP_INITIALIZER(&dp_keys);
+        struct ovn_datapath *od;
+        LIST_FOR_EACH (od, list, &both_dps) {
+            add_key(&dp_keys, od->sb->tunnel_key);
+        }
+
+        /* Add southbound record for each unmatched northbound record. */
+        LIST_FOR_EACH (od, list, &nb_dps) {
+            uint16_t tunnel_key = allocate_datapath_key(&dp_keys);
+            if (!tunnel_key) {
+                break;
+            }
+
+            od->sb = sbrec_datapath_binding_insert(ctx->ovnsb_txn);
+            sbrec_datapath_binding_set_logical_datapath(
+                od->sb, od->nb->header_.uuid);
+            sbrec_datapath_binding_set_tunnel_key(od->sb, tunnel_key);
+        }
+    }
+
+    /* Delete southbound records without northbound matches. */
+    struct ovn_datapath *od;
+    LIST_FOR_EACH (od, list, &sb_dps) {
+        sbrec_datapath_binding_delete(od->sb);
+    }
+
+    struct ovs_list sb_ports, nb_ports, both_ports;
+
+    join_logical_ports(ctx, port_map, &sb_ports, &nb_ports, &both_ports);
+
+    /* For logical ports that are in both databases, update the southbound
+     * record based on northbound data.  Also index the in-use tunnel_keys. */
+    struct ovn_port *op;
+    LIST_FOR_EACH (op, list, &both_ports) {
+        if (!macs_equal(op->sb->mac, op->sb->n_mac,
+                        op->nb->macs, op->nb->n_macs)) {
+            sbrec_port_binding_set_mac(op->sb, (const char **) op->nb->macs,
+                                       op->nb->n_macs);
+        }
+        if (!parents_equal(op->sb, op->nb)) {
+            sbrec_port_binding_set_parent_port(op->sb, op->nb->parent_name);
+        }
+        if (!tags_equal(op->sb, op->nb)) {
+            sbrec_port_binding_set_tag(op->sb, op->nb->tag, op->nb->n_tag);
+        }
+
+        od = find_datapath_by_uuid(dp_map, &op->nb->header_.uuid);
+        if (!od || !od->sb) {
+            /* XXX delete southbound port */
+        } else {
+            if (op->sb->logical_datapath != od->sb) {
+                sbrec_port_binding_set_logical_datapath(op->sb, od->sb);
+            }
+            add_key(&od->port_keys, op->sb->tunnel_key);
+            if (op->sb->tunnel_key > od->max_port_key) {
+                od->max_port_key = op->sb->tunnel_key;
+            }
+        }
+    }
+
+    /* Add southbound record for each unmatched northbound record. */
+    LIST_FOR_EACH (op, list, &nb_ports) {
+        od = find_datapath_by_uuid(dp_map, &op->nb->header_.uuid);
+        if (!od || !od->sb) {
+            continue;
+        }
+
+        uint16_t tunnel_key = allocate_port_key(od);
+        if (!tunnel_key) {
+            continue;
+        }
+
+        op->sb = sbrec_port_binding_insert(ctx->ovnsb_txn);
+        sbrec_port_binding_set_logical_port(op->sb, op->nb->name);
+        sbrec_port_binding_set_mac(op->sb, (const char **) op->nb->macs,
+                                   op->nb->n_macs);
+        if (op->nb->parent_name && op->nb->n_tag > 0) {
+            sbrec_port_binding_set_parent_port(op->sb, op->nb->parent_name);
+            sbrec_port_binding_set_tag(op->sb, op->nb->tag, op->nb->n_tag);
+        }
+
+        sbrec_port_binding_set_tunnel_key(op->sb, tunnel_key);
+        sbrec_port_binding_set_logical_datapath(op->sb, od->sb);
+    }
+
+    /* Delete southbound records without northbound matches. */
+    LIST_FOR_EACH (op, list, &sb_ports) {
+        sbrec_port_binding_delete(op->sb);
+    }
 }
 
 struct ovn_port {
@@ -274,14 +489,6 @@ lport_is_enabled(const struct nbrec_logical_port *lport)
 {
     return !lport->enabled || *lport->enabled;
 }
-
-/* Updates the Pipeline table in the OVN_SB database, constructing its contents
- * based on the OVN_NB database. */
-static void
-build_pipeline(struct northd_context *ctx, struct hmap *datapaths, struct hmap *ports)
-{
-    /* XXX */
-}
 
 static bool
 parents_equal(const struct sbrec_port_binding *binding,
@@ -352,118 +559,6 @@ join_logical_ports(struct northd_context *ctx, struct hmap *name_map,
             list_push_back(nb_only, &op->list);
         }
     }
-}
-
-static void
-join_datapaths(struct northd_context *ctx, struct hmap *uuid_map,
-               struct ovs_list *sb_only, struct ovs_list *nb_only,
-               struct ovs_list *both)
-{
-    hmap_init(uuid_map);
-    list_init(sb_only);
-    list_init(nb_only);
-    list_init(both);
-
-    const struct sbrec_datapath_binding *sb;
-    SBREC_DATAPATH_BINDING_FOR_EACH (sb, ctx->ovnsb_idl) {
-        struct ovn_datapath *od = xzalloc(sizeof *od);
-        od->key = sb->logical_datapath;
-        od->sb = sb;
-        od->nb = NULL;
-        hmap_init(&od->port_keys);
-        od->max_port_key = 0;
-        hmap_insert(uuid_map, &od->key_node, uuid_hash(&od->key));
-        list_push_back(sb_only, &od->list);
-    }
-
-    const struct nbrec_logical_switch *nb;
-    NBREC_LOGICAL_SWITCH_FOR_EACH (nb, ctx->ovnnb_idl) {
-        struct ovn_datapath *od = find_datapath_by_uuid(uuid_map,
-                                                        &nb->header_.uuid);
-        if (od) {
-            od->nb = nb;
-            list_remove(&od->list);
-            list_push_back(both, &od->list);
-        } else {
-            od = xzalloc(sizeof *od);
-            od->key = nb->header_.uuid;
-            od->sb = NULL;
-            od->nb = nb;
-            hmap_init(&od->port_keys);
-            od->max_port_key = 0;
-            hmap_insert(uuid_map, &od->key_node, uuid_hash(&od->key));
-            list_push_back(nb_only, &od->list);
-        }
-    }
-}
-
-struct key_node {
-    struct hmap_node hmap_node;
-    uint32_t key;
-};
-
-static void
-add_key(struct hmap *set, uint32_t key)
-{
-    struct key_node *node = xmalloc(sizeof *node);
-    hmap_insert(set, &node->hmap_node, hash_int(key, 0));
-    node->key = key;
-}
-
-static bool
-key_in_use(const struct hmap *set, uint32_t key)
-{
-    const struct key_node *node;
-    HMAP_FOR_EACH_IN_BUCKET (node, hmap_node, hash_int(key, 0), set) {
-        if (node->key == key) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static uint32_t
-allocate_key(struct hmap *set, const char *name, uint32_t max, uint32_t *prev)
-{
-    for (uint32_t key = *prev + 1; key != *prev;
-         key = key + 1 <= max ? key + 1 : 1) {
-        if (!key_in_use(set, key)) {
-            add_key(set, key);
-            *prev = key;
-            return key;
-        }
-    }
-
-    static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
-    VLOG_WARN_RL(&rl, "all %s tunnel keys exhausted", name);
-    return 0;
-}
-
-static uint32_t
-allocate_datapath_key(struct hmap *dp_keys)
-{
-    static uint32_t prev;
-    return allocate_key(dp_keys, "datapath", (1u << 24) - 1, &prev);
-}
-
-static uint32_t
-allocate_port_key(struct ovn_datapath *dj)
-{
-    return allocate_key(&dj->port_keys, "port",
-                        (1u << 16) - 1, &dj->max_port_key);
-}
-
-/*
- * When a change has occurred in the OVN_Northbound database, we go through and
- * make sure that the contents of the Port_Binding table in the OVN_Southbound
- * database are up to date with the logical ports defined in the
- * OVN_Northbound database.
- */
-static void
-build_bindings(struct northd_context *ctx, struct hmap *dp_map,
-               struct hmap *port_map)
-{
-    /* XXX */
 }
 
 static void

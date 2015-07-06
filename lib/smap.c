@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, 2014 Nicira, Inc.
+/* Copyright (c) 2012, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -213,6 +213,16 @@ smap_get_int(const struct smap *smap, const char *key, int def)
     const char *value = smap_get(smap, key);
 
     return value ? atoi(value) : def;
+}
+
+/* Gets the value associated with 'key' in 'smap' and converts it to a UUID
+ * using uuid_from_string().  Returns true if successful, false if 'key' is not
+ * in 'smap' or if 'key' does not have the correct syntax for a UUID. */
+bool
+smap_get_uuid(const struct smap *smap, const char *key, struct uuid *uuid)
+{
+    const char *value = smap_get(smap, key);
+    return value && uuid_from_string(uuid, s);
 }
 
 /* Returns true of there are no elements in 'smap'. */
