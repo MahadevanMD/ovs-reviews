@@ -36,6 +36,9 @@
             "columns": {
                 "logical_datapath": {"type": {"key": {"type": "uuid",
                                                       "refTable": "Datapath_Binding"}}},
+                "pipeline": {"type": {"key": {"type": "string",
+                                      "enum": ["set", ["ingress",
+                                                       "egress"]]}}},
                 "table_id": {"type": {"key": {"type": "integer",
                                               "minInteger": 0,
                                               "maxInteger": 31}}},
@@ -55,7 +58,7 @@
                                      "maxInteger": 65535}}},
                 "logical_port": {"type": {"key": {"type": "uuid",
                                                   "refTable": "Port_Binding"}}}},
-	    "indexes": [["logical_datapath", "tunnel_key", "logical_port"]],
+            "indexes": [["logical_datapath", "tunnel_key", "logical_port"]],
             "isRoot": true},
         "Datapath_Binding": {
             "columns": {
@@ -70,6 +73,7 @@
             "isRoot": true},
         "Port_Binding": {
             "columns": {
+                "logical_port": {"type": "string"},
                 "datapath": {"type": {"key": {"type": "uuid",
                                               "refTable": "Datapath_Binding"}}},
                 "tunnel_key": {
@@ -88,10 +92,7 @@
                                      "min": 0, "max": 1}},
                 "mac": {"type": {"key": "string",
                                  "min": 0,
-                                 "max": "unlimited"}},
-                "external_ids": {
-                    "type": {"key": "string", "value": "string",
-                             "min": 0, "max": "unlimited"}}},
-            "indexes": [["datapath", "tunnel_key"]],
+                                 "max": "unlimited"}}},
+            "indexes": [["datapath", "tunnel_key"], ["logical_port"]],
             "isRoot": true}},
     "version": "1.0.0"}

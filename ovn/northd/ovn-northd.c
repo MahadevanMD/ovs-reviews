@@ -354,17 +354,8 @@ join_logical_ports(struct northd_context *ctx, struct hmap *name_map,
 
     const struct sbrec_port_binding *sb;
     SBREC_PORT_BINDING_FOR_EACH (sb, ctx->ovnsb_idl) {
-        const char *name = smap_get(&sb->external_ids, "logical-port");
-        if (!name) {
-            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
-            VLOG_INFO_RL(&rl, "deleting Port_Binding "UUID_FMT" that lacks "
-                         "external-ids:logical-port",
-                         UUID_ARGS(&sb->header_.uuid));
-            sbrec_port_binding_delete(sb);
-            continue;
-        }
-
-        struct ovn_port *op = ovn_port_create(name_map, name, NULL, sb);
+        struct ovn_port *op = ovn_port_create(name_map, sb->logical_port,
+                                              NULL, sb);
         list_push_back(sb_only, &op->list);
     }
 
@@ -752,15 +743,11 @@ ovnsb_db_changed(struct northd_context *ctx)
     }
 
     SBREC_PORT_BINDING_FOR_EACH(sb, ctx->ovnsb_idl) {
-        const char *name = smap_get(&sb->external_ids, "logical-port");
-        if (!name) {
-            continue;
-        }
-
         nb = NULL;
         HMAP_FOR_EACH_WITH_HASH(hash_node, node,
-                                hash_string(name, 0), &lports_hmap) {
-            if (!strcmp(name, hash_node->nb->name)) {
+                                hash_string(sb->logical_port, 0),
+                                &lports_hmap) {
+            if (!strcmp(sb->logical_port, hash_node->nb->name)) {
                 nb = hash_node->nb;
                 break;
             }
@@ -912,12 +899,11 @@ main(int argc, char *argv[])
     ctx.ovnsb_idl = ovnsb_idl = ovsdb_idl_create(ovnsb_db,
             &sbrec_idl_class, false, true);
     ovsdb_idl_add_table(ovnsb_idl, &sbrec_table_port_binding);
-    ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_external_ids);
+    ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_logical_port);
     ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_chassis);
     ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_mac);
     ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_tag);
     ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_parent_port);
-    ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_external_ids);
     ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_tunnel_key);
     ovsdb_idl_add_column(ovnsb_idl, &sbrec_pipeline_col_logical_datapath);
     ovsdb_idl_omit_alert(ovnsb_idl, &sbrec_pipeline_col_logical_datapath);

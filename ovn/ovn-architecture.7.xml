@@ -674,14 +674,16 @@
       </p>
 
       <p>
-        Table 0 also processes packets that arrive from other hypervisors.
-        These packets are distinguished by their tunnel ingress port.  As with
-        packets just entering the OVN pipeline, the actions annotate these
-        packets with logical datapath and logical ingress port metadata.  The
-        actions also set the logical output port field, obtained from the
-        tunnel encapsulation (see <code>Tunnel Encapsulations</code> below).
-        Then the actions resubmit to table 33 to enter the logical egress
-        pipeline.
+        Table 0 also processes packets that arrive from other hypervisors.  It
+        distinguishes them from other packets by ingress port, which is a
+        tunnel.  As with packets just entering the OVN pipeline, the actions
+        annotate these packets with logical datapath and logical ingress port
+        metadata.  In addition, the actions set the logical output port field,
+        which is available because in OVN tunneling occurs after the logical
+        output port is known.  These three pieces of information are obtained
+        from the tunnel encapsulation metadata (see <code>Tunnel
+        Encapsulations</code> for encoding details).  Then the actions resubmit
+        to table 33 to enter the logical egress pipeline.
       </p>
     </li>
 
@@ -724,10 +726,11 @@
 
     <li>
       <p>
-        OpenFlow tables 32 through 47 implement the logical <code>output</code>
-        action.  Specifically, table 32 handles packets to remote hypervisors,
-        table 33 handles packets to the local hypervisor, and table 34 discards
-        packets whose logical ingress and egress port are the same.
+        OpenFlow tables 32 through 47 implement the <code>output</code> action
+        in the the logical ingress pipeline.  Specifically, table 32 handles
+        packets to remote hypervisors, table 33 handles packets to the local
+        hypervisor, and table 34 discards packets whose logical ingress and
+        egress port are the same.
       </p>
 
       <p>

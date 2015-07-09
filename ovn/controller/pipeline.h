@@ -37,8 +37,9 @@ struct controller_ctx;
 struct uuid;
 
 /* Logical ports. */
-#define MFF_LOG_INPORT  MFF_REG6 /* Logical input port. */
-#define MFF_LOG_OUTPORT MFF_REG7 /* Logical output port. */
+#define MFF_LOG_DATAPATH MFF_METADATA /* Logical datapath (64 bits). */
+#define MFF_LOG_INPORT   MFF_REG6     /* Logical input port (32 bits). */
+#define MFF_LOG_OUTPORT  MFF_REG7     /* Logical output port (32 bits). */
 
 void pipeline_init(void);
 void pipeline_run(struct controller_ctx *);
