@@ -649,11 +649,7 @@
         in a logical flow's <ref column="logical_datapath"/>.
         <code>outport</code> may name a logical port, as <code>inport</code>.
         It may also name a logical multicast group defined in the <ref
-        table="Multicast_Group"/> table using a name of the form
-        <code>_mc<var>n</var></code> where <var>n</var> is the group's <ref
-        table="Multicast_Group" column="tunnel_key"/>,
-        e.g. <code>_mc32768</code> for the group with <ref
-        table="Multicast_Group" column="tunnel_key"/> 32768.
+        table="Multicast_Group"/> table.
       </p>
 
       <ul>
@@ -694,18 +690,24 @@
       </p>
 
       <p>
-	The following actions will be initially supported:
+	The following actions are supported:
       </p>
 
       <dl>
         <dt><code>output;</code></dt>
         <dd>
           <p>
-	    Outputs the packet to the logical port or multicast group currently
-	    designated by <code>outport</code>.  In an <code>ingress</code>
-	    flow, this action executes the <code>egress</code> pipeline as a
-	    subroutine.  In an <code>egress</code> flow, this action performs
-	    the actual output.
+	    In an <code>ingress</code> flow, this action executes the
+	    <code>egress</code> pipeline as a subroutine.  If
+	    <code>outport</code> names a logical port, the egress pipeline
+	    executes once; if it is a multicast group, the egress pipeline runs
+	    once for each logical port in the group.
+          </p>
+
+          <p>
+            In an <code>egress</code> flow, this action performs the actual
+            output to the <code>outport</code> logical port.  (In the egress
+            pipeline, <code>outport</code> never names a multicast group.)
           </p>
 
           <p>
@@ -800,6 +802,14 @@
 
     <p>
       Multicast group numbers are scoped within a logical datapath.
+    </p>
+
+    <p>
+      In the <ref table="Pipeline"/> table, multicast groups may be used as
+      output ports using names of the form <code>_mc<var>n</var></code> where
+      <var>n</var> is the group's <ref column="tunnel_key"/>.  For example, the
+      action <code>outport = "_mc32768";</code> designates multicast group
+      32768 for output.
     </p>
 
     <p>
@@ -908,9 +918,9 @@
         <li>Tunnel ID 0 is reserved for internal use within OVN.</li>
         <li>Tunnel IDs 1 through 32767, inclusive, may be assigned to logical
         ports.</li>
-        <li>Tunnel IDs 32768 through 65534, inclusive, may be assigned to
-        logical multicast groups (XXX refer to Multicast table).</li>
-        <li>Tunnel ID 65535 represents logical broadcast.</li>
+        <li>Tunnel IDs 32768 through 65535, inclusive, may be assigned to
+        logical multicast groups (see the <ref table="Multicast_Group"/>
+        table.</li>
       </ul>
     </column>
 

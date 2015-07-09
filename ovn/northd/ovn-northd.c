@@ -296,7 +296,6 @@ build_datapaths(struct northd_context *ctx, struct hmap *dp_map)
         sbrec_datapath_binding_delete(od->sb);
     }
 }
-
 
 struct ovn_port {
     struct hmap_node key_node;  /* Index on 'key'. */
@@ -322,6 +321,7 @@ find_port_by_name(struct hmap *name_map, const char *name)
     }
     return NULL;
 }
+
 static uint32_t
 allocate_port_key(struct ovn_datapath *dj)
 {
