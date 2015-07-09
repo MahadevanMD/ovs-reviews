@@ -41,7 +41,7 @@
                                                        "egress"]]}}},
                 "table_id": {"type": {"key": {"type": "integer",
                                               "minInteger": 0,
-                                              "maxInteger": 31}}},
+                                              "maxInteger": 15}}},
                 "priority": {"type": {"key": {"type": "integer",
                                               "minInteger": 0,
                                               "maxInteger": 65535}}},

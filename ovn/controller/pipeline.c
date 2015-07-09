@@ -255,17 +255,24 @@ pipeline_run(struct controller_ctx *ctx)
             continue;
         }
 
-        /* Translate OVN actions into OpenFlow actions. */
+        /* Translate logical table ID to physical table ID. */
+        bool ingress = !strcmp(pipeline->pipeline, "ingress");
+        uint8_t phys_table = pipeline->table_id + (ingress ? 16 : 48);
+        uint8_t next_phys_table = pipeline->table_id < 15 ? phys_table + 1 : 0;
+        uint8_t output_phys_table = ingress ? 32 : 64;
+
+        /* Translate OVN actions into OpenFlow actions.
+         *
+         * XXX Deny changes to 'outport' in egress pipeline. */
         uint64_t ofpacts_stub[64 / 8];
         struct ofpbuf ofpacts;
         struct expr *prereqs;
-        uint8_t next_table_id;
         char *error;
 
         ofpbuf_use_stub(&ofpacts, ofpacts_stub, sizeof ofpacts_stub);
-        next_table_id = pipeline->table_id < 31 ? pipeline->table_id + 17 : 0;
         error = actions_parse_string(pipeline->actions, &symtab, &ldp->ports,
-                                     next_table_id, &ofpacts, &prereqs);
+                                     next_phys_table, output_phys_table,
+                                     &ofpacts, &prereqs);
         if (error) {
             static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
             VLOG_WARN_RL(&rl, "error parsing actions \"%s\": %s",
@@ -309,7 +316,7 @@ pipeline_run(struct controller_ctx *ctx)
                 m->match.flow.conj_id += conj_id_ofs;
             }
             if (!m->n) {
-                ofctrl_add_flow(pipeline->table_id + 16, pipeline->priority,
+                ofctrl_add_flow(phys_table, pipeline->priority,
                                 &m->match, &ofpacts);
             } else {
                 uint64_t conj_stubs[64 / 8];
@@ -325,7 +332,7 @@ pipeline_run(struct controller_ctx *ctx)
                     dst->clause = src->clause;
                     dst->n_clauses = src->n_clauses;
                 }
-                ofctrl_add_flow(pipeline->table_id + 16, pipeline->priority,
+                ofctrl_add_flow(phys_table, pipeline->priority,
                                 &m->match, &conj);
                 ofpbuf_uninit(&conj);
             }
