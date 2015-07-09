@@ -599,7 +599,10 @@
 
   <p>
     This section describes how a packet travels from ingress into OVN from one
-    virtual machine or container to another.
+    virtual machine or container to another.  This description focuses on the
+    physical treatment of a packet; for a description of the logical life cycle
+    of a packet, please refer to the <code>Pipeline</code> table in
+    <code>ovn-sb</code>(5).
   </p>
 
   <p>
@@ -874,9 +877,9 @@
   <diagram>
     <header name="">
       <bits name="reserved" above="9" below="0" width=".5"/>
-      <bits name="datapath" above="24" width="1.25"/>
       <bits name="ingress port" above="15" width=".75"/>
       <bits name="egress port" above="16" width=".75"/>
+      <bits name="datapath" above="24" width="1.25"/>
     </header>
   </diagram>
 

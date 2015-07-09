@@ -250,22 +250,41 @@
     <p><em>Logical Life Cycle of a Packet</em></p>
 
     <p>
-      The life cycle of a packet through a logical datapath is described below.
-      These steps are written as if OVN itself executes these steps, but in
-      fact OVN (through <code>ovn-controller</code>) programs Open vSwitch, via
-      OpenFlow and OVSDB, to execute them on its behalf.
+      This following description focuses on the life cycle of a packet through
+      a logical datapath, ignoring physical details of the implementation.
+      Please refer to <em>Life Cycle of a Packet</em> in
+      <code>ovn-architecture</code>(7) for the physical information.
     </p>
 
     <p>
-      To start, OVN searches the <ref table="Pipeline"/> table for a row with
-      correct <ref column="logical_datapath"/>, a <ref column="pipeline"/> of
-      <code>ingress</code>, a <ref column="table_id"/> of 0, and a <ref
-      column="match"/> that is true for the packet.  If none is found, OVN
-      drops the packet.  If OVN finds more than one, it chooses the match with
-      the highest <ref column="priority"/>.  Then OVN executes each of the
-      actions specified in the row's <ref table="actions"/> column, in the
-      order specified.  Some actions, such as those to modify packet headers,
-      require no further details.  The <code>next</code> and
+      The description here is written as if OVN itself executes these steps,
+      but in fact OVN (that is, <code>ovn-controller</code>) programs Open
+      vSwitch, via OpenFlow and OVSDB, to execute them on its behalf.
+    </p>
+
+    <p>
+      At a high level, OVN passes each packet through the logical datapath's
+      logical ingress pipeline, which may output the packet to one or more
+      logical port or logical multicast groups.  For each such logical output
+      port, OVN passes the packet through the datapath's logical egress
+      pipeline, which may either drop the packet or deliver it to the
+      destination.  Between the two pipelines, outputs to logical multicast
+      groups are expanded into logical ports, so that the egress pipeline only
+      processes a single logical output port at a time.  Between the two
+      pipelines is also where, when necessary, OVN encapsulates a packet in a
+      tunnel (or tunnels) to transmit to remote hypervisors.
+    </p>
+
+    <p>
+      In more detail, to start, OVN searches the <ref table="Pipeline"/> table
+      for a row with correct <ref column="logical_datapath"/>, a <ref
+      column="pipeline"/> of <code>ingress</code>, a <ref column="table_id"/>
+      of 0, and a <ref column="match"/> that is true for the packet.  If none
+      is found, OVN drops the packet.  If OVN finds more than one, it chooses
+      the match with the highest <ref column="priority"/>.  Then OVN executes
+      each of the actions specified in the row's <ref table="actions"/> column,
+      in the order specified.  Some actions, such as those to modify packet
+      headers, require no further details.  The <code>next</code> and
       <code>output</code> actions are special.
     </p>
 
@@ -284,8 +303,14 @@
       <code>outport</code> designates a logical port.  First, OVN compares
       <code>inport</code> to <code>outport</code>; if they are equal, it treats
       the <code>output</code> as a no-op.  In the common case, where they are
-      different, the packet enters the egress pipeline.  OVN again searches the
-      <ref table="Pipeline"/> table for a row with correct <ref
+      different, the packet enters the egress pipeline.  This transition to the
+      egress pipeline discards register data (<code>reg0</code>
+      ... <code>reg5</code>).
+    </p>
+
+    <p>
+      To execute the egress pipeline, OVN again searches the <ref
+      table="Pipeline"/> table for a row with correct <ref
       column="logical_datapath"/>, a <ref column="table_id"/> of 0, a <ref
       column="match"/> that is true for the packet, but now looking for a <ref
       column="pipeline"/> of <code>egress</code>.  If no matching row is found,
@@ -633,8 +658,8 @@
 
       <ul>
         <li>
-          <code>metadata</code> <code>reg0</code> ... <code>reg7</code>
-          <code>xreg0</code> ... <code>xreg3</code>
+          <code>reg0</code>...<code>reg5</code>
+          <code>xreg0</code>...<code>xreg2</code>
         </li>
         <li><code>inport</code> <code>outport</code> <code>queue</code></li>
         <li><code>eth.src</code> <code>eth.dst</code> <code>eth.type</code></li>

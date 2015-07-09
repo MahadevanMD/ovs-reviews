@@ -65,6 +65,19 @@ chassis_tunnel_find(struct hmap *tunnels, const char *chassis_id)
 }
 
 static void
+put_load(uint64_t value, enum mf_field_id dst, int ofs, int n_bits,
+         struct ofpbuf *ofpacts)
+{
+    struct ofpact_set_field *sf = ofpact_put_SET_FIELD(ofpacts);
+    sf->field = mf_from_id(dst);
+    sf->flow_has_vlan = false;
+
+    ovs_be64 n_value = htonll(value);
+    bitwise_copy(&n_value, 8, 0, &sf->value, sf->field->n_bytes, ofs, n_bits);
+    bitwise_one(&sf->mask, sf->field->n_bytes, ofs, n_bits);
+}
+
+static void
 put_move(enum mf_field_id src, int src_ofs,
          enum mf_field_id dst, int dst_ofs,
          int n_bits,
@@ -227,72 +240,147 @@ physical_run(struct controller_ctx *ctx)
             /* Resubmit to first logical pipeline table. */
             put_resubmit(16, &ofpacts);
             ofctrl_add_flow(0, tag ? 150 : 100, &match, &ofpacts);
+
+            /* Table 33, priority 100.
+             * =======================
+             *
+             * Implements output to local hypervisor.  Each flow matches a
+             * logical output port on the local hypervisor, and resubmits to
+             * table 34.
+             *
+             * XXX multicast groups
+             */
+
+            match_init_catchall(&match);
+            ofpbuf_clear(&ofpacts);
+
+            /* Match MFF_LOG_DATAPATH, MFF_LOG_OUTPORT. */
+            match_set_metadata(&match, htonll(binding->datapath->tunnel_key));
+            match_set_reg(&match, MFF_LOG_OUTPORT - MFF_REG0,
+                          binding->tunnel_key);
+
+            /* Resubmit to table 34. */
+            put_resubmit(34, &ofpacts);
+            ofctrl_add_flow(34, 100, &match, &ofpacts);
         } else {
+            /* Table 0, priority 100.
+             * ======================
+             *
+             * For packets that arrive from a remote hypervisor (by matching a
+             * tunnel in_port), set MFF_LOG_DATAPATH, MFF_LOG_INPORT, and
+             * MFF_LOG_OUTPORT from the tunnel key data, then resubmit to table
+             * 33 to handle packets to the local hypervisor. */
+
             match_init_catchall(&match);
             match_set_in_port(&match, tun->ofport);
 
             ofpbuf_clear(&ofpacts);
-            if (tun->type == STT) {
-                put_move(MFF_TUN_ID, 31, MFF_LOG_DATAPATH, 0, 24, &ofpacts);
-                put_move(MFF_TUN_ID, 16, MFF_LOG_INPORT,   0, 15, &ofpacts);
-                put_move(MFF_TUN_ID, 15, MFF_LOG_OUTPORT,  0, 16, &ofpacts);
-            } else if (tun->type == GENEVE) {
+            if (tun->type == GENEVE) {
                 put_move(MFF_TUN_ID, 0,  MFF_LOG_DATAPATH, 0, 24, &ofpacts);
                 put_move(MFF_TUN_METADATA0, 16, MFF_LOG_INPORT, 0, 15,
                          &ofpacts);
                 put_move(MFF_TUN_METADATA0, 0, MFF_LOG_OUTPORT, 0, 16,
                          &ofpacts);
+            } else if (tun->type == STT) {
+                put_move(MFF_TUN_ID, 40, MFF_LOG_INPORT,   0, 15, &ofpacts);
+                put_move(MFF_TUN_ID, 24, MFF_LOG_OUTPORT,  0, 16, &ofpacts);
+                put_move(MFF_TUN_ID,  0, MFF_LOG_DATAPATH, 0, 24, &ofpacts);
+            } else {
+                OVS_NOT_REACHED();
             }
             put_resubmit(33, &ofpacts);
 
             ofctrl_add_flow(0, 100, &match, &ofpacts);
+
+            /* Table 32, priority 100.
+             * =======================
+             *
+             * Implements output to remote hypervisors.  Each flow matches an
+             * output port that includes a logical port on a remote hypervisor,
+             * and tunnels the packet to that hypervisor.
+             *
+             * XXX multicast groups
+             */
+
+            match_init_catchall(&match);
+            ofpbuf_clear(&ofpacts);
+
+            /* Match MFF_LOG_DATAPATH, MFF_LOG_OUTPORT. */
+            match_set_metadata(&match, htonll(binding->datapath->tunnel_key));
+            match_set_reg(&match, MFF_LOG_OUTPORT - MFF_REG0,
+                          binding->tunnel_key);
+
+            /* Set tunnel encapsulation metadata. */
+            if (tun->type == GENEVE) {
+                put_load(binding->datapath->tunnel_key, MFF_TUN_ID, 0, 24,
+                         &ofpacts);
+                put_load(binding->tunnel_key, MFF_TUN_METADATA0, 0, 32,
+                         &ofpacts);
+                put_move(MFF_LOG_INPORT, 0, MFF_TUN_METADATA0, 16, 15,
+                         &ofpacts);
+            } else if (tun->type == STT) {
+                uint64_t outport = binding->tunnel_key;
+                put_load(binding->datapath->tunnel_key | (outport << 24),
+                         MFF_TUN_ID, 0, 64, &ofpacts);
+                put_move(MFF_LOG_INPORT, 0, MFF_TUN_ID, 40, 15, &ofpacts);
+            } else {
+                OVS_NOT_REACHED();
+            }
+
+            /* Output to tunnel. */
+            ofpact_put_OUTPUT(&ofpacts)->port = ofport;
+            ofctrl_add_flow(32, 100, &match, &ofpacts);
         }
 
-        /* Table 64, Priority 100.
+        /* Table 34, Priority 100.
          * =======================
          *
          * Drop packets whose logical inport and outport are the same. */
         match_init_catchall(&match);
         ofpbuf_clear(&ofpacts);
+        match_set_metadata(&match, htonll(binding->datapath->tunnel_key));
         match_set_reg(&match, MFF_LOG_INPORT - MFF_REG0, binding->tunnel_key);
         match_set_reg(&match, MFF_LOG_OUTPORT - MFF_REG0, binding->tunnel_key);
-        ofctrl_add_flow(64, 100, &match, &ofpacts);
+        ofctrl_add_flow(34, 100, &match, &ofpacts);
 
-        /* Table 64, Priority 50.
+        /* Table 64, Priority 100.
          * ======================
          *
-         * For packets to remote machines, send them over a tunnel to the
-         * remote chassis.
-         *
-         * For packets to local vifs, deliver them directly. */
+         * Deliver the packet to the local vif. */
         match_init_catchall(&match);
         ofpbuf_clear(&ofpacts);
+        match_set_metadata(&match, htonll(binding->datapath->tunnel_key));
         match_set_reg(&match, MFF_LOG_OUTPORT - MFF_REG0, binding->tunnel_key);
-        if (tun) {
-            /* Set MFF_TUN_ID. */
-            struct ofpact_set_field *sf = ofpact_put_SET_FIELD(&ofpacts);
-            sf->field = mf_from_id(MFF_TUN_ID);
-            sf->value.be64 = htonll(binding->tunnel_key);
-            sf->mask.be64 = OVS_BE64_MAX;
-        }
         if (tag) {
             /* For containers sitting behind a local vif, tag the packets
-             * before delivering them. Since there is a possibility of
-             * packets needing to hair-pin back into the same vif from
-             * which it came, make the in_port as zero. */
+             * before delivering them. */
             struct ofpact_vlan_vid *vlan_vid;
             vlan_vid = ofpact_put_SET_VLAN_VID(&ofpacts);
             vlan_vid->vlan_vid = tag;
             vlan_vid->push_vlan_if_needed = true;
 
+            /* A packet might need to hair-pin back into its ingress OpenFlow
+             * port (to a different logical port, which we already checked back
+             * in table 34), so set the in_port to zero. */
             struct ofpact_set_field *sf = ofpact_put_SET_FIELD(&ofpacts);
             sf->field = mf_from_id(MFF_IN_PORT);
             sf->value.be16 = 0;
             sf->mask.be16 = OVS_BE16_MAX;
         }
         ofpact_put_OUTPUT(&ofpacts)->port = ofport;
-        ofctrl_add_flow(64, 50, &match, &ofpacts);
+        ofctrl_add_flow(64, 100, &match, &ofpacts);
     }
+
+    /* Table 34, Priority 0.
+     * =======================
+     *
+     * Resubmit packets that don't output to the ingress port to the egress
+     * pipeline. */
+    struct match match;
+    match_init_catchall(&match);
+    ofpbuf_clear(&ofpacts);
+    put_resubmit(48, &ofpacts);
+    ofctrl_add_flow(34, 0, &match, &ofpacts);
 
     ofpbuf_uninit(&ofpacts);
     simap_destroy(&lport_to_ofport);
