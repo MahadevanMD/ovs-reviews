@@ -546,9 +546,11 @@ pipeline_add(struct pipeline_ctx *ctx, struct ovn_datapath *od,
                 pipeline_hash(pipeline));
 }
 
+#if 0
 static void
 multicast_add(struct pipeline_ctx *ctx, const char *multicast_group,
               const struct ovn_datapath *od, const struct ovn_port *op);
+#endif
 
 /* Appends port security constraints on L2 address field 'eth_addr_field'
  * (e.g. "eth.src" or "eth.dst") to 'match'.  'port_security', with
@@ -585,6 +587,131 @@ lport_is_enabled(const struct nbrec_logical_port *lport)
 {
     return !lport->enabled || *lport->enabled;
 }
+
+/* Updates the Pipeline table in the OVN_SB database, constructing its contents
+ * based on the OVN_NB database. */
+static void
+build_pipeline(struct northd_context *ctx, struct hmap *datapaths, struct hmap *ports)
+{
+    struct pipeline_ctx pc = {
+        .ovnsb_idl = ctx->ovnsb_idl,
+        .ovnsb_txn = ctx->ovnsb_txn,
+        .pipeline_hmap = HMAP_INITIALIZER(&pc.pipeline_hmap),
+        .datapaths = datapaths
+    };
+
+    /* Table 0: Admission control framework. */
+    struct ovn_datapath *od;
+    HMAP_FOR_EACH (od, key_node, datapaths) {
+        /* Logical VLANs not supported. */
+        pipeline_add(&pc, od, 0, 100, "vlan.present", "drop;");
+
+        /* Broadcast/multicast source address is invalid. */
+        pipeline_add(&pc, od, 0, 100, "eth.src[40]", "drop;");
+
+        /* Port security flows have priority 50 (see below) and will continue
+         * to the next table if packet source is acceptable. */
+
+        /* Otherwise drop the packet. */
+        pipeline_add(&pc, od, 0, 0, "1", "drop;");
+    }
+
+    /* Table 0: Ingress port security. */
+    struct ovn_port *op;
+    HMAP_FOR_EACH (op, key_node, ports) {
+        struct ds match = DS_EMPTY_INITIALIZER;
+        ds_put_cstr(&match, "inport == ");
+        json_string_escape(op->key, &match);
+        build_port_security("eth.src",
+                            op->nb->port_security, op->nb->n_port_security,
+                            &match);
+        pipeline_add(&pc, op->od, 0, 50, ds_cstr(&match),
+                     lport_is_enabled(op->nb) ? "next;" : "drop;");
+        ds_destroy(&match);
+    }
+
+    /* Table 1: Destination lookup, broadcast and multicast handling (priority
+     * 100). */
+    HMAP_FOR_EACH (od, key_node, datapaths) {
+        /* XXX lport_is_enabled() */
+        pipeline_add(&pc, od, 1, 100, "eth.dst[40]",
+                     "outport = \"_FLOOD\"; next;");
+    }
+
+    /* Table 1: Destination lookup, unicast handling (priority 50),  */
+    HMAP_FOR_EACH (op, key_node, ports) {
+        for (size_t i = 0; i < op->nb->n_macs; i++) {
+            uint8_t mac[ETH_ADDR_LEN];
+
+            if (eth_addr_from_string(op->nb->macs[i], mac)) {
+                struct ds match, actions;
+
+                ds_init(&match);
+                ds_put_format(&match, "eth.dst == %s", op->nb->macs[i]);
+
+                ds_init(&actions);
+                ds_put_cstr(&actions, "outport = ");
+                json_string_escape(op->nb->name, &actions);
+                ds_put_cstr(&actions, "; next;");
+                pipeline_add(&pc, op->od, 1, 50,
+                             ds_cstr(&match), ds_cstr(&actions));
+                ds_destroy(&actions);
+                ds_destroy(&match);
+            } else if (!strcmp(op->nb->macs[i], "unknown")) {
+                //multicast_add(&pc, "_unknown", op->od, op);
+                op->od->has_unknown = true;
+            } else {
+                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+
+                VLOG_INFO_RL(&rl, "%s: invalid syntax '%s' in macs column",
+                             op->nb->name, op->nb->macs[i]);
+            }
+        }
+    }
+
+    /* Table 1: Destination lookup for unknown MACs (priority 0). */
+    HMAP_FOR_EACH (od, key_node, datapaths) {
+        if (od->has_unknown) {
+            pipeline_add(&pc, od, 1, 0, "1", "outport = \"_unknown\"; next;");
+        }
+    }
+
+#if 0
+    /* Table 2: ACLs. */
+    const struct nbrec_acl *acl;
+    NBREC_ACL_FOR_EACH (acl, ctx->ovnnb_idl) {
+        const char *action;
+
+        action = (!strcmp(acl->action, "allow") ||
+                  !strcmp(acl->action, "allow-related"))
+                      ? "next;" : "drop;";
+        pipeline_add(&pc, acl->lswitch, 2, acl->priority, acl->match, action);
+    }
+#endif
+    HMAP_FOR_EACH (od, key_node, datapaths) {
+        pipeline_add(&pc, od, 2, 0, "1", "next;");
+    }
+
+    /* Table 3: Egress port security. */
+    HMAP_FOR_EACH (od, key_node, datapaths) {
+        pipeline_add(&pc, od, 3, 100, "eth.dst[40]", "output;");
+    }
+    HMAP_FOR_EACH (op, key_node, ports) {
+        struct ds match;
+
+        ds_init(&match);
+        ds_put_cstr(&match, "outport == ");
+        json_string_escape(op->key, &match);
+        build_port_security("eth.dst",
+                            op->nb->port_security, op->nb->n_port_security,
+                            &match);
+
+        pipeline_add(&pc, op->od, 3, 50, ds_cstr(&match),
+                     lport_is_enabled(op->nb) ? "output;" : "drop;");
+
+        ds_destroy(&match);
+    }
+}
 
 static void
 ovnnb_db_changed(struct northd_context *ctx)
@@ -606,48 +733,52 @@ static void
 ovnsb_db_changed(struct northd_context *ctx)
 {
     struct hmap lports_hmap;
-    const struct sbrec_port_binding *binding;
-    const struct nbrec_logical_port *lport;
+    const struct sbrec_port_binding *sb;
+    const struct nbrec_logical_port *nb;
 
     struct lport_hash_node {
         struct hmap_node node;
-        const struct nbrec_logical_port *lport;
+        const struct nbrec_logical_port *nb;
     } *hash_node, *hash_node_next;
 
     VLOG_DBG("Recalculating port up states for ovn-nb db.");
 
     hmap_init(&lports_hmap);
 
-    NBREC_LOGICAL_PORT_FOR_EACH(lport, ctx->ovnnb_idl) {
+    NBREC_LOGICAL_PORT_FOR_EACH(nb, ctx->ovnnb_idl) {
         hash_node = xzalloc(sizeof *hash_node);
-        hash_node->lport = lport;
-        hmap_insert(&lports_hmap, &hash_node->node,
-                hash_string(lport->name, 0));
+        hash_node->nb = nb;
+        hmap_insert(&lports_hmap, &hash_node->node, hash_string(nb->name, 0));
     }
 
-    SBREC_PORT_BINDING_FOR_EACH(binding, ctx->ovnsb_idl) {
-        lport = NULL;
+    SBREC_PORT_BINDING_FOR_EACH(sb, ctx->ovnsb_idl) {
+        const char *name = smap_get(&sb->external_ids, "logical-port");
+        if (!name) {
+            continue;
+        }
+
+        nb = NULL;
         HMAP_FOR_EACH_WITH_HASH(hash_node, node,
-                hash_string(binding->logical_port, 0), &lports_hmap) {
-            if (!strcmp(binding->logical_port, hash_node->lport->name)) {
-                lport = hash_node->lport;
+                                hash_string(name, 0), &lports_hmap) {
+            if (!strcmp(name, hash_node->nb->name)) {
+                nb = hash_node->nb;
                 break;
             }
         }
 
-        if (!lport) {
+        if (!nb) {
             /* The logical port doesn't exist for this port binding.  This can
              * happen under normal circumstances when ovn-northd hasn't gotten
              * around to pruning the Port_Binding yet. */
             continue;
         }
 
-        if (binding->chassis && (!lport->up || !*lport->up)) {
+        if (sb->chassis && (!nb->up || !*nb->up)) {
             bool up = true;
-            nbrec_logical_port_set_up(lport, &up, 1);
-        } else if (!binding->chassis && (!lport->up || *lport->up)) {
+            nbrec_logical_port_set_up(nb, &up, 1);
+        } else if (!sb->chassis && (!nb->up || *nb->up)) {
             bool up = false;
-            nbrec_logical_port_set_up(lport, &up, 1);
+            nbrec_logical_port_set_up(nb, &up, 1);
         }
     }
 
@@ -781,12 +912,12 @@ main(int argc, char *argv[])
     ctx.ovnsb_idl = ovnsb_idl = ovsdb_idl_create(ovnsb_db,
             &sbrec_idl_class, false, true);
     ovsdb_idl_add_table(ovnsb_idl, &sbrec_table_port_binding);
-    ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_logical_port);
+    ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_external_ids);
     ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_chassis);
     ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_mac);
     ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_tag);
     ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_parent_port);
-    ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_logical_datapath);
+    ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_external_ids);
     ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_tunnel_key);
     ovsdb_idl_add_column(ovnsb_idl, &sbrec_pipeline_col_logical_datapath);
     ovsdb_idl_omit_alert(ovnsb_idl, &sbrec_pipeline_col_logical_datapath);
