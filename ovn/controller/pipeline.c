@@ -200,9 +200,9 @@ ldp_run(struct controller_ctx *ctx)
     SBREC_PORT_BINDING_FOR_EACH (binding, ctx->ovnsb_idl) {
         struct logical_datapath *ldp;
 
-        ldp = ldp_lookup(binding->logical_datapath);
+        ldp = ldp_lookup(binding->datapath);
         if (!ldp) {
-            ldp = ldp_create(binding->logical_datapath);
+            ldp = ldp_create(binding->datapath);
         }
 
         simap_put(&ldp->ports, binding->logical_port, binding->tunnel_key);
