@@ -750,7 +750,7 @@
     </p>
 
     <p>
-      When a chassis shuts down gracefully, it should cleanup the
+      When a chassis shuts down gracefully, it should clean up the
       <code>chassis</code> column that it previously had populated.
       (This is not critical because resources hosted on the chassis are equally
       unreachable regardless of whether their rows are present.)  To handle the
@@ -827,6 +827,13 @@
         gateway port might initially only have <code>unknown</code>, and then
         add MAC addresses to the set as it learns new source addresses.
       </p>
+    </column>
+
+    <column name="external_ids" key="logical-port" type='{"type": "uuid"}'>
+      Each row in <ref table="Port_Binding"/> is associated with some logical
+      port.  <code>ovn-northd</code> uses this key to store the UUID of the
+      logical port <ref table="Logical_Port" db="OVN_Northbound"/> row in the
+      <ref db="OVN_Northbound"/> database.
     </column>
 
     <group title="Common Columns">

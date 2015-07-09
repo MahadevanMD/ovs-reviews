@@ -19,6 +19,7 @@
 
 #include "hash.h"
 #include "json.h"
+#include "uuid.h"
 
 static struct smap_node *smap_add__(struct smap *, char *, void *,
                                     size_t hash);
@@ -222,7 +223,7 @@ bool
 smap_get_uuid(const struct smap *smap, const char *key, struct uuid *uuid)
 {
     const char *value = smap_get(smap, key);
-    return value && uuid_from_string(uuid, s);
+    return value && uuid_from_string(uuid, value);
 }
 
 /* Returns true of there are no elements in 'smap'. */

@@ -18,6 +18,7 @@
 #include "hmap.h"
 
 struct json;
+struct uuid;
 
 /* A map from string to string. */
 struct smap {
