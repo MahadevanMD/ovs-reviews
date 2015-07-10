@@ -699,19 +699,19 @@ build_pipeline(struct hmap *datapaths, struct hmap *ports)
         }
     }
 
-#if 0                           /* XXX */
     /* Egress table 0: ACLs. */
-    const struct nbrec_acl *acl;
-    NBREC_ACL_FOR_EACH (acl, ctx->ovnnb_idl) {
-        const char *action;
+    HMAP_FOR_EACH (od, key_node, datapaths) {
+        for (size_t i = 0; i < od->nb->n_acls; i++) {
+            const struct nbrec_acl *acl = od->nb->acls[i];
+            const char *action;
 
-        action = (!strcmp(acl->action, "allow") ||
-                  !strcmp(acl->action, "allow-related"))
-                      ? "next;" : "drop;";
-        pipeline_add(&pm, acl->lswitch, D_OUT, 0, acl->priority,
-                     acl->match, action);
+            action = (!strcmp(acl->action, "allow") ||
+                      !strcmp(acl->action, "allow-related"))
+                ? "next;" : "drop;";
+            pipeline_add(&pm, od, D_OUT, 0, acl->priority,
+                         acl->match, action);
+        }
     }
-#endif
     HMAP_FOR_EACH (od, key_node, datapaths) {
         pipeline_add(&pm, od, D_OUT, 0, 0, "1", "next;");
     }
