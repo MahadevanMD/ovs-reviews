@@ -484,28 +484,54 @@ build_ports(struct northd_context *ctx, struct hmap *dp_map,
 
 /* Multicast group entry. */
 struct ovn_multicast {
-    struct hmap_node hmap_node; /* Index on 'port', 'key', */
-    struct ovn_port *port;
+    struct hmap_node hmap_node; /* Index on 'datapath', 'key', */
+    struct ovn_datapath *datapath;
     uint16_t key;               /* OVN_MIN_MULTICAST...OVN_MAX_MULTICAST. */
+
+    struct ovn_port **ports;
+    size_t n_ports, allocated_ports;
 };
+
+static uint32_t
+ovn_multicast_hash(const struct ovn_datapath *datapath, uint16_t key)
+{
+    return hash_pointer(datapath, key);
+}
+
+static struct ovn_multicast *
+ovn_multicast_find(struct hmap *mcgroups,
+                   struct ovn_datapath *datapath, uint16_t key)
+{
+    struct ovn_multicast *mc;
+
+    HMAP_FOR_EACH_WITH_HASH (mc, hmap_node, ovn_multicast_hash(datapath, key),
+                             mcgroups) {
+        if (mc->datapath == datapath && mc->key == key) {
+            return mc;
+        }
+    }
+    return NULL;
+}
 
 static void
 ovn_multicast_add(struct hmap *mcgroups, struct ovn_port *port, uint16_t key)
 {
-    uint32_t hash = hash_pointer(port, key);
-    struct ovn_multicast *mc;
-
-    HMAP_FOR_EACH_WITH_HASH (mc, hmap_node, hash, mcgroups) {
-        if (mc->port == port && mc->key == key) {
-            /* Already exists. */
-            return;
-        }
+    struct ovn_datapath *od = port->od;
+    struct ovn_multicast *mc = ovn_multicast_find(mcgroups, od, key);
+    if (!mc) {
+        mc = xmalloc(sizeof *mc);
+        hmap_insert(mcgroups, &mc->hmap_node, ovn_multicast_hash(od, key));
+        mc->datapath = od;
+        mc->key = key;
+        mc->n_ports = 0;
+        mc->allocated_ports = 4;
+        mc->ports = xmalloc(mc->allocated_ports * sizeof *mc->ports);
     }
-
-    mc = xmalloc(sizeof *mc);
-    hmap_insert(mcgroups, &mc->hmap_node, hash);
-    mc->port = port;
-    mc->key = key;
+    if (mc->n_ports >= mc->allocated_ports) {
+        mc->ports = x2nrealloc(mc->ports, &mc->allocated_ports,
+                               sizeof *mc->ports);
+    }
+    mc->ports[mc->n_ports++] = port;
 }
 
 /* Pipeline generation.

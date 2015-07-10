@@ -791,13 +791,11 @@
     </p>
 
     <p>
-      Each set of rows in this table with the same <ref
-      column="logical_datapath"/> and <ref column="tunnel_key"/> defines a
-      logical multicast group numbered <ref column="tunnel_key"/> within <ref
-      column="logical_datapath"/>.  Such a multicast group consists of the
-      logical ports named in its <ref column="logical_port"/> columns, which
-      must all be in the <ref column="logical_datapath"/> logical datapath (but
-      the database schema cannot enforce this).
+      Each row in this table defines a logical multicast group numbered <ref
+      column="tunnel_key"/> within <ref column="datapath"/>, whose logical
+      ports are listed in the <ref column="ports"/> column.  All of the ports
+      must be in the <ref column="datapath"/> logical datapath (but the
+      database schema cannot enforce this).
     </p>
 
     <p>
@@ -818,12 +816,13 @@
     </p>
 
     <p>
-      An index prevents this table from containing entirely duplicate rows.
+      An index prevents this table from containing rows with the same pair of
+      <ref column="datapath"/> and <ref column="tunnel_key"/> values.
     </p>
 
-    <column name="logical_datapath"/>
+    <column name="datapath"/>
     <column name="tunnel_key"/>
-    <column name="logical_port"/>
+    <column name="ports"/>
   </table>
 
   <table name="Datapath_Binding" title="Physical-Logical Datapath Bindings">

@@ -21,9 +21,13 @@
 #include "ofpbuf.h"
 #include "ovn-controller.h"
 #include "ovn/lib/ovn-sb-idl.h"
+#include "openvswitch/vlog.h"
 #include "pipeline.h"
 #include "simap.h"
+#include "sset.h"
 #include "vswitch-idl.h"
+
+VLOG_DEFINE_THIS_MODULE(physical);
 
 void
 physical_init(struct controller_ctx *ctx)
@@ -98,6 +102,24 @@ put_resubmit(uint8_t table_id, struct ofpbuf *ofpacts)
     struct ofpact_resubmit *resubmit = ofpact_put_RESUBMIT(ofpacts);
     resubmit->in_port = OFPP_IN_PORT;
     resubmit->table_id = table_id;
+}
+
+static void
+put_encapsulation(const struct chassis_tunnel *tun,
+                  const struct sbrec_datapath_binding *datapath,
+                  uint16_t outport, struct ofpbuf *ofpacts)
+{
+    if (tun->type == GENEVE) {
+        put_load(datapath->tunnel_key, MFF_TUN_ID, 0, 24, ofpacts);
+        put_load(outport, MFF_TUN_METADATA0, 0, 32, ofpacts);
+        put_move(MFF_LOG_INPORT, 0, MFF_TUN_METADATA0, 16, 15, ofpacts);
+    } else if (tun->type == STT) {
+        put_load(datapath->tunnel_key | (outport << 24), MFF_TUN_ID, 0, 64,
+                 ofpacts);
+        put_move(MFF_LOG_INPORT, 0, MFF_TUN_ID, 40, 15, ofpacts);
+    } else {
+        OVS_NOT_REACHED();
+    }
 }
 
 void
@@ -220,17 +242,10 @@ physical_run(struct controller_ctx *ctx)
                 match_set_dl_vlan(&match, htons(tag));
             }
 
-            /* Set MFF_LOG_DATAPATH. */
-            struct ofpact_set_field *sf = ofpact_put_SET_FIELD(&ofpacts);
-            sf->field = mf_from_id(MFF_LOG_DATAPATH);
-            sf->value.be64 = htonll(binding->datapath->tunnel_key);
-            sf->mask.be64 = OVS_BE64_MAX;
-
-            /* Set MFF_LOG_INPORT. */
-            sf = ofpact_put_SET_FIELD(&ofpacts);
-            sf->field = mf_from_id(MFF_LOG_INPORT);
-            sf->value.be32 = htonl(binding->tunnel_key);
-            sf->mask.be32 = OVS_BE32_MAX;
+            /* Set MFF_LOG_DATAPATH and MFF_LOG_INPORT. */
+            put_load(binding->datapath->tunnel_key, MFF_LOG_DATAPATH, 0, 64,
+                     &ofpacts);
+            put_load(binding->tunnel_key, MFF_LOG_INPORT, 0, 32, &ofpacts);
 
             /* Strip vlans. */
             if (tag) {
@@ -310,22 +325,8 @@ physical_run(struct controller_ctx *ctx)
             match_set_reg(&match, MFF_LOG_OUTPORT - MFF_REG0,
                           binding->tunnel_key);
 
-            /* Set tunnel encapsulation metadata. */
-            if (tun->type == GENEVE) {
-                put_load(binding->datapath->tunnel_key, MFF_TUN_ID, 0, 24,
-                         &ofpacts);
-                put_load(binding->tunnel_key, MFF_TUN_METADATA0, 0, 32,
-                         &ofpacts);
-                put_move(MFF_LOG_INPORT, 0, MFF_TUN_METADATA0, 16, 15,
-                         &ofpacts);
-            } else if (tun->type == STT) {
-                uint64_t outport = binding->tunnel_key;
-                put_load(binding->datapath->tunnel_key | (outport << 24),
-                         MFF_TUN_ID, 0, 64, &ofpacts);
-                put_move(MFF_LOG_INPORT, 0, MFF_TUN_ID, 40, 15, &ofpacts);
-            } else {
-                OVS_NOT_REACHED();
-            }
+            put_encapsulation(tun, binding->datapath,
+                              binding->tunnel_key, &ofpacts);
 
             /* Output to tunnel. */
             ofpact_put_OUTPUT(&ofpacts)->port = ofport;
@@ -362,13 +363,74 @@ physical_run(struct controller_ctx *ctx)
             /* A packet might need to hair-pin back into its ingress OpenFlow
              * port (to a different logical port, which we already checked back
              * in table 34), so set the in_port to zero. */
-            struct ofpact_set_field *sf = ofpact_put_SET_FIELD(&ofpacts);
-            sf->field = mf_from_id(MFF_IN_PORT);
-            sf->value.be16 = 0;
-            sf->mask.be16 = OVS_BE16_MAX;
+            put_load(0, MFF_IN_PORT, 0, 16, &ofpacts);
         }
         ofpact_put_OUTPUT(&ofpacts)->port = ofport;
         ofctrl_add_flow(64, 100, &match, &ofpacts);
+    }
+
+    const struct sbrec_multicast_group *mc;
+    SBREC_MULTICAST_GROUP_FOR_EACH (mc, ctx->ovnsb_idl) {
+        struct sset remote_chassis = SSET_INITIALIZER(&remote_chassis);
+        struct match match;
+
+        match_init_catchall(&match);
+        match_set_metadata(&match, htonll(mc->datapath->tunnel_key));
+        match_set_reg(&match, MFF_LOG_OUTPORT - MFF_REG0, mc->tunnel_key);
+
+        ofpbuf_clear(&ofpacts);
+        for (size_t i = 0; i < mc->n_ports; i++) {
+            struct sbrec_port_binding *port = mc->ports[i];
+
+            if (port->datapath != mc->datapath) {
+                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
+                VLOG_WARN_RL(&rl, UUID_FMT": multicast group contains ports "
+                             "in wrong datapath",
+                             UUID_ARGS(&mc->header_.uuid));
+                continue;
+            }
+
+            if (simap_contains(&lport_to_ofport, port->logical_port)) {
+                put_load(port->tunnel_key, MFF_LOG_OUTPORT, 0, 32, &ofpacts);
+                put_resubmit(34, &ofpacts);
+            } else if (port->chassis) {
+                sset_add(&remote_chassis, port->chassis->name);
+            }
+        }
+
+        bool local_ports = ofpacts.size > 0;
+        if (local_ports) {
+            ofctrl_add_flow(33, 100, &match, &ofpacts);
+        }
+
+        if (!sset_is_empty(&remote_chassis)) {
+            ofpbuf_clear(&ofpacts);
+
+            const char *chassis;
+            const struct chassis_tunnel *prev = NULL;
+            SSET_FOR_EACH (chassis, &remote_chassis) {
+                const struct chassis_tunnel *tun
+                    = chassis_tunnel_find(&tunnels, chassis);
+                if (!tun) {
+                    continue;
+                }
+
+                if (!prev || tun->type != prev->type) {
+                    put_encapsulation(tun, mc->datapath, mc->tunnel_key,
+                                      &ofpacts);
+                    prev = tun;
+                }
+                ofpact_put_OUTPUT(&ofpacts)->port = tun->ofport;
+            }
+
+            if (ofpacts.size) {
+                if (local_ports) {
+                    put_resubmit(33, &ofpacts);
+                }
+                ofctrl_add_flow(32, 100, &match, &ofpacts);
+            }
+        }
+        sset_destroy(&remote_chassis);
     }
 
     /* Table 34, Priority 0.

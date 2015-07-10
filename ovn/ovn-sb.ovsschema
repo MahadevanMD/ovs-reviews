@@ -50,15 +50,17 @@
             "isRoot": true},
         "Multicast_Group": {
             "columns": {
-                "logical_datapath": {"type": {"key": {"type": "uuid",
-                                                      "refTable": "Datapath_Binding"}}},
+                "datapath": {"type": {"key": {"type": "uuid",
+                                              "refTable": "Datapath_Binding"}}},
                 "tunnel_key": {
                     "type": {"key": {"type": "integer",
                                      "minInteger": 32768,
                                      "maxInteger": 65535}}},
-                "logical_port": {"type": {"key": {"type": "uuid",
-                                                  "refTable": "Port_Binding"}}}},
-            "indexes": [["logical_datapath", "tunnel_key", "logical_port"]],
+                "ports": {"type": {"key": {"type": "uuid",
+                                           "refTable": "Port_Binding",
+                                           "refType": "weak"},
+                                   "min": 1, "max": "unlimited"}}},
+            "indexes": [["datapath", "tunnel_key"]],
             "isRoot": true},
         "Datapath_Binding": {
             "columns": {
