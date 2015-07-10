@@ -261,6 +261,7 @@ join_datapaths(struct northd_context *ctx, struct hmap *dp_map,
                          "lacks external-ids:logical-switch",
                          UUID_ARGS(&sb->header_.uuid));
             sbrec_datapath_binding_delete(sb);
+            continue;
         }
 
         if (ovn_datapath_find(dp_map, &key)) {
@@ -505,7 +506,7 @@ build_ports(struct northd_context *ctx, struct hmap *dp_map,
     }
 
     /* Add southbound record for each unmatched northbound record. */
-    LIST_FOR_EACH (op, list, &nb_ports) {
+    LIST_FOR_EACH_SAFE (op, next, list, &nb_ports) {
         struct ovn_datapath *od = ovn_datapath_find(dp_map,
                                                     &op->nb->header_.uuid);
         if (!od || !od->sb) {
