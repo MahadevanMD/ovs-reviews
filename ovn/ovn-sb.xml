@@ -919,7 +919,7 @@
         ports.</li>
         <li>Tunnel IDs 32768 through 65535, inclusive, may be assigned to
         logical multicast groups (see the <ref table="Multicast_Group"/>
-        table.</li>
+        table).</li>
       </ul>
     </column>
 
