@@ -256,9 +256,9 @@ join_datapaths(struct northd_context *ctx, struct hmap *dp_map,
     SBREC_DATAPATH_BINDING_FOR_EACH_SAFE (sb, sb_next, ctx->ovnsb_idl) {
         struct uuid key;
         if (!smap_get_uuid(&sb->external_ids, "logical-switch", &key)) {
-            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
-            VLOG_INFO_RL(&rl, "deleting Datapath_Binding "UUID_FMT" that "
-                         "lacks external-ids:logical-switch",
+            ovsdb_idl_txn_add_comment(ctx->ovnsb_txn,
+                                      "deleting Datapath_Binding "UUID_FMT" that "
+                                      "lacks external-ids:logical-switch",
                          UUID_ARGS(&sb->header_.uuid));
             sbrec_datapath_binding_delete(sb);
             continue;
@@ -1119,6 +1119,14 @@ parse_options(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
     free(short_options);
 }
 
+static void
+add_column_noalert(struct ovsdb_idl *idl,
+                   const struct ovsdb_idl_column *column)
+{
+    ovsdb_idl_add_column(idl, column);
+    ovsdb_idl_omit_alert(idl, column);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -1158,29 +1166,35 @@ main(int argc, char *argv[])
     ctx.ovnnb_idl = ovnnb_idl = ovsdb_idl_create(ovnnb_db,
             &nbrec_idl_class, true, true);
 
-    /* There is only a small subset of changes to the ovn-sb db that ovn-northd
-     * has to care about, so we'll enable monitoring those directly. */
     ctx.ovnsb_idl = ovnsb_idl = ovsdb_idl_create(ovnsb_db,
             &sbrec_idl_class, false, true);
+
+    ovsdb_idl_add_table(ovnsb_idl, &sbrec_table_rule);
+    add_column_noalert(ovnsb_idl, &sbrec_rule_col_logical_datapath);
+    add_column_noalert(ovnsb_idl, &sbrec_rule_col_pipeline);
+    add_column_noalert(ovnsb_idl, &sbrec_rule_col_table_id);
+    add_column_noalert(ovnsb_idl, &sbrec_rule_col_priority);
+    add_column_noalert(ovnsb_idl, &sbrec_rule_col_match);
+    add_column_noalert(ovnsb_idl, &sbrec_rule_col_actions);
+
+    ovsdb_idl_add_table(ovnsb_idl, &sbrec_table_multicast_group);
+    add_column_noalert(ovnsb_idl, &sbrec_multicast_group_col_datapath);
+    add_column_noalert(ovnsb_idl, &sbrec_multicast_group_col_tunnel_key);
+    add_column_noalert(ovnsb_idl, &sbrec_multicast_group_col_name);
+    add_column_noalert(ovnsb_idl, &sbrec_multicast_group_col_ports);
+
+    ovsdb_idl_add_table(ovnsb_idl, &sbrec_table_datapath_binding);
+    add_column_noalert(ovnsb_idl, &sbrec_datapath_binding_col_tunnel_key);
+    add_column_noalert(ovnsb_idl, &sbrec_datapath_binding_col_external_ids);
+
     ovsdb_idl_add_table(ovnsb_idl, &sbrec_table_port_binding);
-    ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_logical_port);
+    add_column_noalert(ovnsb_idl, &sbrec_port_binding_col_datapath);
+    add_column_noalert(ovnsb_idl, &sbrec_port_binding_col_logical_port);
+    add_column_noalert(ovnsb_idl, &sbrec_port_binding_col_tunnel_key);
+    add_column_noalert(ovnsb_idl, &sbrec_port_binding_col_parent_port);
+    add_column_noalert(ovnsb_idl, &sbrec_port_binding_col_tag);
     ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_chassis);
-    ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_mac);
-    ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_tag);
-    ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_parent_port);
-    ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_tunnel_key);
-    ovsdb_idl_add_column(ovnsb_idl, &sbrec_rule_col_logical_datapath);
-    ovsdb_idl_omit_alert(ovnsb_idl, &sbrec_rule_col_logical_datapath);
-    ovsdb_idl_add_column(ovnsb_idl, &sbrec_rule_col_pipeline);
-    ovsdb_idl_omit_alert(ovnsb_idl, &sbrec_rule_col_pipeline);
-    ovsdb_idl_add_column(ovnsb_idl, &sbrec_rule_col_table_id);
-    ovsdb_idl_omit_alert(ovnsb_idl, &sbrec_rule_col_table_id);
-    ovsdb_idl_add_column(ovnsb_idl, &sbrec_rule_col_priority);
-    ovsdb_idl_omit_alert(ovnsb_idl, &sbrec_rule_col_priority);
-    ovsdb_idl_add_column(ovnsb_idl, &sbrec_rule_col_match);
-    ovsdb_idl_omit_alert(ovnsb_idl, &sbrec_rule_col_match);
-    ovsdb_idl_add_column(ovnsb_idl, &sbrec_rule_col_actions);
-    ovsdb_idl_omit_alert(ovnsb_idl, &sbrec_rule_col_actions);
+    add_column_noalert(ovnsb_idl, &sbrec_port_binding_col_mac);
 
     /*
      * The loop here just runs the IDL in a loop waiting for the seqno to
