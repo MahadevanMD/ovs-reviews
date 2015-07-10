@@ -799,15 +799,13 @@
     </p>
 
     <p>
-      Multicast group numbers are scoped within a logical datapath.
+      Multicast group numbers and names are scoped within a logical datapath.
     </p>
 
     <p>
-      In the <ref table="Rule"/> table, multicast groups may be used as output
-      ports using names of the form <code>_mc<var>n</var></code> where
-      <var>n</var> is the group's <ref column="tunnel_key"/>.  For example, the
-      action <code>outport = "_mc32768";</code> designates multicast group
-      32768 for output.
+      In the <ref table="Rule"/> table, multicast groups may be used for output
+      just as for individual logical ports, by assigning the group's name to
+      <code>outport</code>,
     </p>
 
     <p>
@@ -816,12 +814,14 @@
     </p>
 
     <p>
-      An index prevents this table from containing rows with the same pair of
-      <ref column="datapath"/> and <ref column="tunnel_key"/> values.
+      An index prevents this table from containing any two rows with the same
+      <ref column="datapath"/> and <ref column="tunnel_key"/> values or the
+      same <ref column="datapath"/> and <ref column="name"/> values.
     </p>
 
     <column name="datapath"/>
     <column name="tunnel_key"/>
+    <column name="name"/>
     <column name="ports"/>
   </table>
 

@@ -249,6 +249,14 @@ join_datapaths(struct northd_context *ctx, struct hmap *dp_map,
                          "lacks external-ids:logical-switch",
                          UUID_ARGS(&sb->header_.uuid));
             sbrec_datapath_binding_delete(sb);
+        }
+
+        if (ovn_datapath_find(dp_map, &key)) {
+            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
+            VLOG_INFO_RL(&rl, "deleting Datapath_Binding "UUID_FMT" with "
+                         "duplicate external-ids:logical-switch "UUID_FMT,
+                         UUID_ARGS(&sb->header_.uuid), UUID_ARGS(&key));
+            sbrec_datapath_binding_delete(sb);
             continue;
         }
 
@@ -534,31 +542,43 @@ build_ports(struct northd_context *ctx, struct hmap *dp_map,
 #define OVN_MIN_MULTICAST 32768
 #define OVN_MAX_MULTICAST 65535
 
+struct multicast_group {
+    const char *name;
+    uint16_t key;               /* OVN_MIN_MULTICAST...OVN_MAX_MULTICAST. */
+};
+
+#define MC_FLOOD "_mc_flood"
+static const struct multicast_group mc_flood = { MC_FLOOD, 65535 };
+
+#define MC_UNKNOWN "_mc_unknown"
+static const struct multicast_group mc_unknown = { MC_UNKNOWN, 65534 };
+
 /* Multicast group entry. */
 struct ovn_multicast {
     struct hmap_node hmap_node; /* Index on 'datapath', 'key', */
     struct ovn_datapath *datapath;
-    uint16_t key;               /* OVN_MIN_MULTICAST...OVN_MAX_MULTICAST. */
+    const struct multicast_group *group;
 
     struct ovn_port **ports;
     size_t n_ports, allocated_ports;
 };
 
 static uint32_t
-ovn_multicast_hash(const struct ovn_datapath *datapath, uint16_t key)
+ovn_multicast_hash(const struct ovn_datapath *datapath,
+                   const struct multicast_group *group)
 {
-    return hash_pointer(datapath, key);
+    return hash_pointer(datapath, group->key);
 }
 
 static struct ovn_multicast *
-ovn_multicast_find(struct hmap *mcgroups,
-                   struct ovn_datapath *datapath, uint16_t key)
+ovn_multicast_find(struct hmap *mcgroups, struct ovn_datapath *datapath,
+                   const struct multicast_group *group)
 {
     struct ovn_multicast *mc;
 
-    HMAP_FOR_EACH_WITH_HASH (mc, hmap_node, ovn_multicast_hash(datapath, key),
-                             mcgroups) {
-        if (mc->datapath == datapath && mc->key == key) {
+    HMAP_FOR_EACH_WITH_HASH (mc, hmap_node,
+                             ovn_multicast_hash(datapath, group), mcgroups) {
+        if (mc->datapath == datapath && mc->group == group) {
             return mc;
         }
     }
@@ -566,15 +586,16 @@ ovn_multicast_find(struct hmap *mcgroups,
 }
 
 static void
-ovn_multicast_add(struct hmap *mcgroups, struct ovn_port *port, uint16_t key)
+ovn_multicast_add(struct hmap *mcgroups, const struct multicast_group *group,
+                  struct ovn_port *port)
 {
     struct ovn_datapath *od = port->od;
-    struct ovn_multicast *mc = ovn_multicast_find(mcgroups, od, key);
+    struct ovn_multicast *mc = ovn_multicast_find(mcgroups, od, group);
     if (!mc) {
         mc = xmalloc(sizeof *mc);
-        hmap_insert(mcgroups, &mc->hmap_node, ovn_multicast_hash(od, key));
+        hmap_insert(mcgroups, &mc->hmap_node, ovn_multicast_hash(od, group));
         mc->datapath = od;
-        mc->key = key;
+        mc->group = group;
         mc->n_ports = 0;
         mc->allocated_ports = 4;
         mc->ports = xmalloc(mc->allocated_ports * sizeof *mc->ports);
@@ -599,17 +620,41 @@ struct ovn_rule {
     enum ovn_pipeline { P_IN, P_OUT } pipeline;
     uint8_t table_id;
     uint16_t priority;
-    const char *match;
-    const char *actions;
+    char *match;
+    char *actions;
 };
 
 static size_t
-rule_hash(const struct ovn_rule *rule)
+ovn_rule_hash(const struct ovn_rule *rule)
 {
     size_t hash = uuid_hash(&rule->od->key);
     hash = hash_2words((rule->table_id << 16) | rule->priority, hash);
     hash = hash_string(rule->match, hash);
     return hash_string(rule->actions, hash);
+}
+
+static bool
+ovn_rule_equal(const struct ovn_rule *a, const struct ovn_rule *b)
+{
+    return (a->od == b->od
+            && a->pipeline == b->pipeline
+            && a->table_id == b->table_id
+            && a->priority == b->priority
+            && !strcmp(a->match, b->match)
+            && !strcmp(a->actions, b->actions));
+}
+
+static void
+ovn_rule_init(struct ovn_rule *rule, struct ovn_datapath *od,
+              enum ovn_pipeline pipeline, uint8_t table_id, uint16_t priority,
+              char *match, char *actions)
+{
+    rule->od = od;
+    rule->pipeline = pipeline;
+    rule->table_id = table_id;
+    rule->priority = priority;
+    rule->match = match;
+    rule->actions = actions;
 }
 
 /* Adds a row with the specified contents to the Rule table. */
@@ -619,13 +664,38 @@ rule_add(struct hmap *rule_map, struct ovn_datapath *od,
          const char *match, const char *actions)
 {
     struct ovn_rule *rule = xmalloc(sizeof *rule);
-    rule->od = od;
-    rule->pipeline = pipeline;
-    rule->table_id = table_id;
-    rule->priority = priority;
-    rule->match = xstrdup(match);
-    rule->actions = xstrdup(actions);
-    hmap_insert(rule_map, &rule->hmap_node, rule_hash(rule));
+    ovn_rule_init(rule, od, pipeline, table_id, priority,
+                  xstrdup(match), xstrdup(actions));
+    hmap_insert(rule_map, &rule->hmap_node, ovn_rule_hash(rule));
+}
+
+static struct ovn_rule *
+ovn_rule_find(struct hmap *rules, struct ovn_datapath *od,
+              enum ovn_pipeline pipeline, uint8_t table_id, uint16_t priority,
+              const char *match, const char *actions)
+{
+    struct ovn_rule target;
+    ovn_rule_init(&target, od, pipeline, table_id, priority,
+                  CONST_CAST(char *, match), CONST_CAST(char *, actions));
+
+    struct ovn_rule *rule;
+    HMAP_FOR_EACH_WITH_HASH (rule, hmap_node, ovn_rule_hash(&target), rules) {
+        if (ovn_rule_equal(rule, &target)) {
+            return rule;
+        }
+    }
+    return NULL;
+}
+
+static void
+ovn_rule_destroy(struct hmap *rules, struct ovn_rule *rule)
+{
+    if (rule) {
+        hmap_remove(rules, &rule->hmap_node);
+        free(rule->match);
+        free(rule->actions);
+        free(rule);
+    }
 }
 
 /* Appends port security constraints on L2 address field 'eth_addr_field'
@@ -664,27 +734,28 @@ lport_is_enabled(const struct nbrec_logical_port *lport)
     return !lport->enabled || *lport->enabled;
 }
 
-/* Updates the Rule table in the OVN_SB database, constructing its contents
- * based on the OVN_NB database. */
+/* Updates the Rule and Multicast_Group tables in the OVN_SB database,
+ * constructing their contents based on the OVN_NB database. */
 static void
-build_rule(struct hmap *datapaths, struct hmap *ports)
+build_rule(struct northd_context *ctx, struct hmap *datapaths,
+           struct hmap *ports)
 {
-    struct hmap pm = HMAP_INITIALIZER(&pm);
+    struct hmap rules = HMAP_INITIALIZER(&rules);
 
     /* Ingress table 0: Admission control framework. */
     struct ovn_datapath *od;
     HMAP_FOR_EACH (od, key_node, datapaths) {
         /* Logical VLANs not supported. */
-        rule_add(&pm, od, P_IN, 0, 100, "vlan.present", "drop;");
+        rule_add(&rules, od, P_IN, 0, 100, "vlan.present", "drop;");
 
         /* Broadcast/multicast source address is invalid. */
-        rule_add(&pm, od, P_IN, 0, 100, "eth.src[40]", "drop;");
+        rule_add(&rules, od, P_IN, 0, 100, "eth.src[40]", "drop;");
 
         /* Port security flows have priority 50 (see below) and will continue
          * to the next table if packet source is acceptable. */
 
         /* Otherwise drop the packet. */
-        rule_add(&pm, od, P_IN, 0, 0, "1", "drop;");
+        rule_add(&rules, od, P_IN, 0, 0, "1", "drop;");
     }
 
     /* Ingress table 0: Ingress port security. */
@@ -696,21 +767,23 @@ build_rule(struct hmap *datapaths, struct hmap *ports)
         build_port_security("eth.src",
                             op->nb->port_security, op->nb->n_port_security,
                             &match);
-        rule_add(&pm, op->od, P_IN, 0, 50, ds_cstr(&match),
-                     lport_is_enabled(op->nb) ? "next;" : "drop;");
+        rule_add(&rules, op->od, P_IN, 0, 50, ds_cstr(&match),
+                 lport_is_enabled(op->nb) ? "next;" : "drop;");
         ds_destroy(&match);
     }
 
     /* Ingress table 1: Destination lookup, broadcast and multicast handling
      * (priority 100). */
+    HMAP_FOR_EACH (op, key_node, ports) {
+        ovn_multicast_add(&rules, &mc_flood, op);
+    }
     HMAP_FOR_EACH (od, key_node, datapaths) {
         /* XXX lport_is_enabled() */
-        rule_add(&pm, od, P_IN, 1, 100, "eth.dst[40]",
-                     "outport = \"_FLOOD\"; next;");
+        rule_add(&rules, od, P_IN, 1, 100, "eth.dst[40]",
+                 "outport = \""MC_FLOOD"\"; next;");
     }
 
     /* Ingress table 1: Destination lookup, unicast handling (priority 50), */
-    enum { MC_UNKNOWN = 32768 };
     HMAP_FOR_EACH (op, key_node, ports) {
         for (size_t i = 0; i < op->nb->n_macs; i++) {
             uint8_t mac[ETH_ADDR_LEN];
@@ -725,12 +798,12 @@ build_rule(struct hmap *datapaths, struct hmap *ports)
                 ds_put_cstr(&actions, "outport = ");
                 json_string_escape(op->nb->name, &actions);
                 ds_put_cstr(&actions, "; next;");
-                rule_add(&pm, op->od, P_IN, 1, 50,
-                             ds_cstr(&match), ds_cstr(&actions));
+                rule_add(&rules, op->od, P_IN, 1, 50,
+                         ds_cstr(&match), ds_cstr(&actions));
                 ds_destroy(&actions);
                 ds_destroy(&match);
             } else if (!strcmp(op->nb->macs[i], "unknown")) {
-                ovn_multicast_add(&pm, op, MC_UNKNOWN);
+                ovn_multicast_add(&rules, &mc_unknown, op);
                 op->od->has_unknown = true;
             } else {
                 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
@@ -744,10 +817,8 @@ build_rule(struct hmap *datapaths, struct hmap *ports)
     /* Ingress table 1: Destination lookup for unknown MACs (priority 0). */
     HMAP_FOR_EACH (od, key_node, datapaths) {
         if (od->has_unknown) {
-            char *actions = xasprintf("outport = \"_mc%d\"; next;",
-                                      MC_UNKNOWN);
-            rule_add(&pm, od, P_IN, 1, 0, "1", actions);
-            free(actions);
+            rule_add(&rules, od, P_IN, 1, 0, "1",
+                     "outport = \""MC_UNKNOWN"\"; next;");
         }
     }
 
@@ -760,17 +831,16 @@ build_rule(struct hmap *datapaths, struct hmap *ports)
             action = (!strcmp(acl->action, "allow") ||
                       !strcmp(acl->action, "allow-related"))
                 ? "next;" : "drop;";
-            rule_add(&pm, od, P_OUT, 0, acl->priority,
-                         acl->match, action);
+            rule_add(&rules, od, P_OUT, 0, acl->priority, acl->match, action);
         }
     }
     HMAP_FOR_EACH (od, key_node, datapaths) {
-        rule_add(&pm, od, P_OUT, 0, 0, "1", "next;");
+        rule_add(&rules, od, P_OUT, 0, 0, "1", "next;");
     }
 
     /* Egress table 1: Egress port security. */
     HMAP_FOR_EACH (od, key_node, datapaths) {
-        rule_add(&pm, od, P_OUT, 1, 100, "eth.dst[40]", "output;");
+        rule_add(&rules, od, P_OUT, 1, 100, "eth.dst[40]", "output;");
     }
     HMAP_FOR_EACH (op, key_node, ports) {
         struct ds match;
@@ -782,10 +852,48 @@ build_rule(struct hmap *datapaths, struct hmap *ports)
                             op->nb->port_security, op->nb->n_port_security,
                             &match);
 
-        rule_add(&pm, op->od, P_OUT, 1, 50, ds_cstr(&match),
-                     lport_is_enabled(op->nb) ? "output;" : "drop;");
+        rule_add(&rules, op->od, P_OUT, 1, 50, ds_cstr(&match),
+                 lport_is_enabled(op->nb) ? "output;" : "drop;");
 
         ds_destroy(&match);
+    }
+
+    const struct sbrec_rule *sb, *next_sb;
+    SBREC_RULE_FOR_EACH_SAFE (sb, next_sb, ctx->ovnsb_idl) {
+        struct uuid key;
+        if (!smap_get_uuid(&sb->logical_datapath->external_ids,
+                           "logical-switch", &key)) {
+            sbrec_rule_delete(sb);
+            continue;
+        }
+
+        struct ovn_datapath *od = ovn_datapath_find(datapaths, &key);
+        if (od) {
+            sbrec_rule_delete(sb);
+        }
+
+        enum ovn_pipeline pipeline = (!strcmp(sb->pipeline, "ingress")
+                                      ? P_IN : P_OUT);
+        struct ovn_rule *rule = ovn_rule_find(&rules, od, pipeline,
+                                              sb->table_id, sb->priority,
+                                              sb->match, sb->actions);
+        if (rule) {
+            ovn_rule_destroy(&rules, rule);
+        } else {
+            sbrec_rule_delete(sb);
+        }
+    }
+    struct ovn_rule *rule, *next_rule;
+    HMAP_FOR_EACH_SAFE (rule, next_rule, hmap_node, &rules) {
+        sb = sbrec_rule_insert(ctx->ovnsb_txn);
+        sbrec_rule_set_logical_datapath(sb, rule->od->sb);
+        sbrec_rule_set_pipeline(sb,
+                                rule->pipeline == P_IN ? "ingress" : "egress");
+        sbrec_rule_set_table_id(sb, rule->table_id);
+        sbrec_rule_set_priority(sb, rule->priority);
+        sbrec_rule_set_match(sb, rule->match);
+        sbrec_rule_set_actions(sb, rule->actions);
+        ovn_rule_destroy(&rules, rule);
     }
 }
 
@@ -797,7 +905,7 @@ ovnnb_db_changed(struct northd_context *ctx)
     struct hmap datapaths, ports;
     build_datapaths(ctx, &datapaths);
     build_ports(ctx, &datapaths, &ports);
-    build_rule(&datapaths, &ports);
+    build_rule(ctx, &datapaths, &ports);
 }
 
 /*

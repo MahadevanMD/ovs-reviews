@@ -52,6 +52,7 @@
             "columns": {
                 "datapath": {"type": {"key": {"type": "uuid",
                                               "refTable": "Datapath_Binding"}}},
+                "name": {"type": "string"},
                 "tunnel_key": {
                     "type": {"key": {"type": "integer",
                                      "minInteger": 32768,
@@ -60,7 +61,8 @@
                                            "refTable": "Port_Binding",
                                            "refType": "weak"},
                                    "min": 1, "max": "unlimited"}}},
-            "indexes": [["datapath", "tunnel_key"]],
+            "indexes": [["datapath", "tunnel_key"],
+                        ["datapath", "name"]],
             "isRoot": true},
         "Datapath_Binding": {
             "columns": {
