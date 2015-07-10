@@ -230,6 +230,18 @@ ovn_datapath_find(struct hmap *dp_map, const struct uuid *uuid)
     return NULL;
 }
 
+static struct ovn_datapath *
+ovn_datapath_from_sbrec(struct hmap *dp_map,
+                        const struct sbrec_datapath_binding *sb)
+{
+    struct uuid key;
+
+    if (!smap_get_uuid(&sb->external_ids, "logical-switch", &key)) {
+        return NULL;
+    }
+    return ovn_datapath_find(dp_map, &key);
+}
+
 static void
 join_datapaths(struct northd_context *ctx, struct hmap *dp_map,
                struct ovs_list *sb_only, struct ovs_list *nb_only,
@@ -553,6 +565,13 @@ static const struct multicast_group mc_flood = { MC_FLOOD, 65535 };
 #define MC_UNKNOWN "_mc_unknown"
 static const struct multicast_group mc_unknown = { MC_UNKNOWN, 65534 };
 
+static bool
+multicast_group_equal(const struct multicast_group *a,
+                      const struct multicast_group *b)
+{
+    return !strcmp(a->name, b->name) && a->key == b->key;
+}
+
 /* Multicast group entry. */
 struct ovn_multicast {
     struct hmap_node hmap_node; /* Index on 'datapath', 'key', */
@@ -578,7 +597,8 @@ ovn_multicast_find(struct hmap *mcgroups, struct ovn_datapath *datapath,
 
     HMAP_FOR_EACH_WITH_HASH (mc, hmap_node,
                              ovn_multicast_hash(datapath, group), mcgroups) {
-        if (mc->datapath == datapath && mc->group == group) {
+        if (mc->datapath == datapath
+            && multicast_group_equal(mc->group, group)) {
             return mc;
         }
     }
@@ -605,6 +625,28 @@ ovn_multicast_add(struct hmap *mcgroups, const struct multicast_group *group,
                                sizeof *mc->ports);
     }
     mc->ports[mc->n_ports++] = port;
+}
+
+static void
+ovn_multicast_destroy(struct hmap *mcgroups, struct ovn_multicast *mc)
+{
+    if (mc) {
+        hmap_remove(mcgroups, &mc->hmap_node);
+        free(mc->ports);
+        free(mc);
+    }
+}
+
+static void
+ovn_multicast_update_sbrec(const struct ovn_multicast *mc,
+                           const struct sbrec_multicast_group *sb)
+{
+    struct sbrec_port_binding **ports = xmalloc(mc->n_ports * sizeof *ports);
+    for (size_t i = 0; i < mc->n_ports; i++) {
+        ports[i] = CONST_CAST(struct sbrec_port_binding *, mc->ports[i]->sb);
+    }
+    sbrec_multicast_group_set_ports(sb, ports, mc->n_ports);
+    free(ports);
 }
 
 /* Rule generation.
@@ -741,6 +783,7 @@ build_rule(struct northd_context *ctx, struct hmap *datapaths,
            struct hmap *ports)
 {
     struct hmap rules = HMAP_INITIALIZER(&rules);
+    struct hmap mcgroups = HMAP_INITIALIZER(&mcgroups);
 
     /* Ingress table 0: Admission control framework. */
     struct ovn_datapath *od;
@@ -775,7 +818,7 @@ build_rule(struct northd_context *ctx, struct hmap *datapaths,
     /* Ingress table 1: Destination lookup, broadcast and multicast handling
      * (priority 100). */
     HMAP_FOR_EACH (op, key_node, ports) {
-        ovn_multicast_add(&rules, &mc_flood, op);
+        ovn_multicast_add(&mcgroups, &mc_flood, op);
     }
     HMAP_FOR_EACH (od, key_node, datapaths) {
         /* XXX lport_is_enabled() */
@@ -803,7 +846,7 @@ build_rule(struct northd_context *ctx, struct hmap *datapaths,
                 ds_destroy(&actions);
                 ds_destroy(&match);
             } else if (!strcmp(op->nb->macs[i], "unknown")) {
-                ovn_multicast_add(&rules, &mc_unknown, op);
+                ovn_multicast_add(&mcgroups, &mc_unknown, op);
                 op->od->has_unknown = true;
             } else {
                 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
@@ -858,43 +901,70 @@ build_rule(struct northd_context *ctx, struct hmap *datapaths,
         ds_destroy(&match);
     }
 
-    const struct sbrec_rule *sb, *next_sb;
-    SBREC_RULE_FOR_EACH_SAFE (sb, next_sb, ctx->ovnsb_idl) {
-        struct uuid key;
-        if (!smap_get_uuid(&sb->logical_datapath->external_ids,
-                           "logical-switch", &key)) {
-            sbrec_rule_delete(sb);
+    /* Push changes to the Rule table to database. */
+    const struct sbrec_rule *sbrule, *next_sbrule;
+    SBREC_RULE_FOR_EACH_SAFE (sbrule, next_sbrule, ctx->ovnsb_idl) {
+        struct ovn_datapath *od
+            = ovn_datapath_from_sbrec(datapaths, sbrule->logical_datapath);
+        if (!od) {
+            sbrec_rule_delete(sbrule);
             continue;
         }
 
-        struct ovn_datapath *od = ovn_datapath_find(datapaths, &key);
-        if (od) {
-            sbrec_rule_delete(sb);
-        }
-
-        enum ovn_pipeline pipeline = (!strcmp(sb->pipeline, "ingress")
-                                      ? P_IN : P_OUT);
-        struct ovn_rule *rule = ovn_rule_find(&rules, od, pipeline,
-                                              sb->table_id, sb->priority,
-                                              sb->match, sb->actions);
+        struct ovn_rule *rule = ovn_rule_find(
+            &rules, od, (!strcmp(sbrule->pipeline, "ingress") ? P_IN : P_OUT),
+            sbrule->table_id, sbrule->priority,
+            sbrule->match, sbrule->actions);
         if (rule) {
             ovn_rule_destroy(&rules, rule);
         } else {
-            sbrec_rule_delete(sb);
+            sbrec_rule_delete(sbrule);
         }
     }
     struct ovn_rule *rule, *next_rule;
     HMAP_FOR_EACH_SAFE (rule, next_rule, hmap_node, &rules) {
-        sb = sbrec_rule_insert(ctx->ovnsb_txn);
-        sbrec_rule_set_logical_datapath(sb, rule->od->sb);
-        sbrec_rule_set_pipeline(sb,
+        sbrule = sbrec_rule_insert(ctx->ovnsb_txn);
+        sbrec_rule_set_logical_datapath(sbrule, rule->od->sb);
+        sbrec_rule_set_pipeline(sbrule,
                                 rule->pipeline == P_IN ? "ingress" : "egress");
-        sbrec_rule_set_table_id(sb, rule->table_id);
-        sbrec_rule_set_priority(sb, rule->priority);
-        sbrec_rule_set_match(sb, rule->match);
-        sbrec_rule_set_actions(sb, rule->actions);
+        sbrec_rule_set_table_id(sbrule, rule->table_id);
+        sbrec_rule_set_priority(sbrule, rule->priority);
+        sbrec_rule_set_match(sbrule, rule->match);
+        sbrec_rule_set_actions(sbrule, rule->actions);
         ovn_rule_destroy(&rules, rule);
     }
+    hmap_destroy(&rules);
+
+    /* Push changes to the Multicast_Group table to database. */
+    const struct sbrec_multicast_group *sbmc, *next_sbmc;
+    SBREC_MULTICAST_GROUP_FOR_EACH_SAFE (sbmc, next_sbmc, ctx->ovnsb_idl) {
+        struct ovn_datapath *od = ovn_datapath_from_sbrec(datapaths,
+                                                          sbmc->datapath);
+        if (!od) {
+            sbrec_multicast_group_delete(sbmc);
+            continue;
+        }
+
+        struct multicast_group group = { .name = sbmc->name,
+                                         .key = sbmc->tunnel_key };
+        struct ovn_multicast *mc = ovn_multicast_find(&mcgroups, od, &group);
+        if (mc) {
+            ovn_multicast_update_sbrec(mc, sbmc);
+            ovn_multicast_destroy(&mcgroups, mc);
+        } else {
+            sbrec_multicast_group_delete(sbmc);
+        }
+    }
+    struct ovn_multicast *mc, *next_mc;
+    HMAP_FOR_EACH_SAFE (mc, next_mc, hmap_node, &mcgroups) {
+        sbmc = sbrec_multicast_group_insert(ctx->ovnsb_txn);
+        sbrec_multicast_group_set_datapath(sbmc, mc->datapath->sb);
+        sbrec_multicast_group_set_name(sbmc, mc->group->name);
+        sbrec_multicast_group_set_tunnel_key(sbmc, mc->group->key);
+        ovn_multicast_update_sbrec(mc, sbmc);
+        ovn_multicast_destroy(&mcgroups, mc);
+    }
+    hmap_destroy(&mcgroups);
 }
 
 static void
