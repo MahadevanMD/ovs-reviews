@@ -479,28 +479,40 @@ build_ports(struct northd_context *ctx, struct hmap *dp_map,
     }
 }
 
+#define OVN_MIN_MULTICAST 32768
+#define OVN_MAX_MULTICAST 65535
+
+/* Multicast group entry. */
+struct ovn_multicast {
+    struct hmap_node hmap_node; /* Index on 'port', 'key', */
+    struct ovn_port *port;
+    uint16_t key;               /* OVN_MIN_MULTICAST...OVN_MAX_MULTICAST. */
+};
+
+static void
+ovn_multicast_add(struct hmap *mcgroups, struct ovn_port *port, uint16_t key)
+{
+    uint32_t hash = hash_pointer(port, key);
+    struct ovn_multicast *mc;
+
+    HMAP_FOR_EACH_WITH_HASH (mc, hmap_node, hash, mcgroups) {
+        if (mc->port == port && mc->key == key) {
+            /* Already exists. */
+            return;
+        }
+    }
+
+    mc = xmalloc(sizeof *mc);
+    hmap_insert(mcgroups, &mc->hmap_node, hash);
+    mc->port = port;
+    mc->key = key;
+}
+
 /* Pipeline generation.
  *
  * This code generates the Pipeline table in the southbound database, as a
  * function of most of the northbound database.
  */
-
-/* Enough context to add a Pipeline row, using pipeline_add(). */
-struct pipeline_ctx {
-    /* From northd_context. */
-    struct ovsdb_idl *ovnsb_idl;
-    struct ovsdb_idl_txn *ovnsb_txn;
-
-    /* Contains "struct pipeline_hash_node"s.  Used to figure out what existing
-     * Pipeline rows should be deleted: we index all of the Pipeline rows into
-     * this data structure, then as existing rows are generated we remove them.
-     * After generating all the rows, any remaining in 'pipeline_hmap' must be
-     * deleted from the database. */
-    struct hmap pipeline_hmap;
-
-    /* Contains ovn_datapaths. */
-    struct hmap *datapaths;
-};
 
 struct ovn_pipeline {
     struct hmap_node hmap_node;
@@ -524,7 +536,7 @@ pipeline_hash(const struct ovn_pipeline *pipeline)
 
 /* Adds a row with the specified contents to the Pipeline table. */
 static void
-pipeline_add(struct pipeline_ctx *ctx, struct ovn_datapath *od,
+pipeline_add(struct hmap *pipeline_map, struct ovn_datapath *od,
              enum ovn_direction direction, uint8_t table_id, uint16_t priority,
              const char *match, const char *actions)
 {
@@ -535,15 +547,8 @@ pipeline_add(struct pipeline_ctx *ctx, struct ovn_datapath *od,
     pipeline->priority = priority;
     pipeline->match = xstrdup(match);
     pipeline->actions = xstrdup(actions);
-    hmap_insert(&ctx->pipeline_hmap, &pipeline->hmap_node,
-                pipeline_hash(pipeline));
+    hmap_insert(pipeline_map, &pipeline->hmap_node, pipeline_hash(pipeline));
 }
-
-#if 0
-static void
-multicast_add(struct pipeline_ctx *ctx, const char *multicast_group,
-              const struct ovn_datapath *od, const struct ovn_port *op);
-#endif
 
 /* Appends port security constraints on L2 address field 'eth_addr_field'
  * (e.g. "eth.src" or "eth.dst") to 'match'.  'port_security', with
@@ -584,29 +589,24 @@ lport_is_enabled(const struct nbrec_logical_port *lport)
 /* Updates the Pipeline table in the OVN_SB database, constructing its contents
  * based on the OVN_NB database. */
 static void
-build_pipeline(struct northd_context *ctx, struct hmap *datapaths, struct hmap *ports)
+build_pipeline(struct hmap *datapaths, struct hmap *ports)
 {
-    struct pipeline_ctx pc = {
-        .ovnsb_idl = ctx->ovnsb_idl,
-        .ovnsb_txn = ctx->ovnsb_txn,
-        .pipeline_hmap = HMAP_INITIALIZER(&pc.pipeline_hmap),
-        .datapaths = datapaths
-    };
+    struct hmap pm = HMAP_INITIALIZER(&pm);
 
     /* Ingress table 0: Admission control framework. */
     struct ovn_datapath *od;
     HMAP_FOR_EACH (od, key_node, datapaths) {
         /* Logical VLANs not supported. */
-        pipeline_add(&pc, od, D_IN, 0, 100, "vlan.present", "drop;");
+        pipeline_add(&pm, od, D_IN, 0, 100, "vlan.present", "drop;");
 
         /* Broadcast/multicast source address is invalid. */
-        pipeline_add(&pc, od, D_IN, 0, 100, "eth.src[40]", "drop;");
+        pipeline_add(&pm, od, D_IN, 0, 100, "eth.src[40]", "drop;");
 
         /* Port security flows have priority 50 (see below) and will continue
          * to the next table if packet source is acceptable. */
 
         /* Otherwise drop the packet. */
-        pipeline_add(&pc, od, D_IN, 0, 0, "1", "drop;");
+        pipeline_add(&pm, od, D_IN, 0, 0, "1", "drop;");
     }
 
     /* Ingress table 0: Ingress port security. */
@@ -618,7 +618,7 @@ build_pipeline(struct northd_context *ctx, struct hmap *datapaths, struct hmap *
         build_port_security("eth.src",
                             op->nb->port_security, op->nb->n_port_security,
                             &match);
-        pipeline_add(&pc, op->od, D_IN, 0, 50, ds_cstr(&match),
+        pipeline_add(&pm, op->od, D_IN, 0, 50, ds_cstr(&match),
                      lport_is_enabled(op->nb) ? "next;" : "drop;");
         ds_destroy(&match);
     }
@@ -627,11 +627,12 @@ build_pipeline(struct northd_context *ctx, struct hmap *datapaths, struct hmap *
      * (priority 100). */
     HMAP_FOR_EACH (od, key_node, datapaths) {
         /* XXX lport_is_enabled() */
-        pipeline_add(&pc, od, D_IN, 1, 100, "eth.dst[40]",
+        pipeline_add(&pm, od, D_IN, 1, 100, "eth.dst[40]",
                      "outport = \"_FLOOD\"; next;");
     }
 
     /* Ingress table 1: Destination lookup, unicast handling (priority 50), */
+    enum { MC_UNKNOWN = 32768 };
     HMAP_FOR_EACH (op, key_node, ports) {
         for (size_t i = 0; i < op->nb->n_macs; i++) {
             uint8_t mac[ETH_ADDR_LEN];
@@ -646,12 +647,12 @@ build_pipeline(struct northd_context *ctx, struct hmap *datapaths, struct hmap *
                 ds_put_cstr(&actions, "outport = ");
                 json_string_escape(op->nb->name, &actions);
                 ds_put_cstr(&actions, "; next;");
-                pipeline_add(&pc, op->od, D_IN, 1, 50,
+                pipeline_add(&pm, op->od, D_IN, 1, 50,
                              ds_cstr(&match), ds_cstr(&actions));
                 ds_destroy(&actions);
                 ds_destroy(&match);
             } else if (!strcmp(op->nb->macs[i], "unknown")) {
-                //multicast_add(&pc, "_unknown", op->od, op);
+                ovn_multicast_add(&pm, op, MC_UNKNOWN);
                 op->od->has_unknown = true;
             } else {
                 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
@@ -665,8 +666,10 @@ build_pipeline(struct northd_context *ctx, struct hmap *datapaths, struct hmap *
     /* Ingress table 1: Destination lookup for unknown MACs (priority 0). */
     HMAP_FOR_EACH (od, key_node, datapaths) {
         if (od->has_unknown) {
-            pipeline_add(&pc, od, D_IN, 1, 0, "1",
-                         "outport = \"_unknown\"; next;");
+            char *actions = xasprintf("outport = \"_mc%d\"; next;",
+                                      MC_UNKNOWN);
+            pipeline_add(&pm, od, D_IN, 1, 0, "1", actions);
+            free(actions);
         }
     }
 
@@ -679,17 +682,17 @@ build_pipeline(struct northd_context *ctx, struct hmap *datapaths, struct hmap *
         action = (!strcmp(acl->action, "allow") ||
                   !strcmp(acl->action, "allow-related"))
                       ? "next;" : "drop;";
-        pipeline_add(&pc, acl->lswitch, D_OUT, 0, acl->priority,
+        pipeline_add(&pm, acl->lswitch, D_OUT, 0, acl->priority,
                      acl->match, action);
     }
 #endif
     HMAP_FOR_EACH (od, key_node, datapaths) {
-        pipeline_add(&pc, od, D_OUT, 0, 0, "1", "next;");
+        pipeline_add(&pm, od, D_OUT, 0, 0, "1", "next;");
     }
 
     /* Egress table 1: Egress port security. */
     HMAP_FOR_EACH (od, key_node, datapaths) {
-        pipeline_add(&pc, od, D_OUT, 1, 100, "eth.dst[40]", "output;");
+        pipeline_add(&pm, od, D_OUT, 1, 100, "eth.dst[40]", "output;");
     }
     HMAP_FOR_EACH (op, key_node, ports) {
         struct ds match;
@@ -701,7 +704,7 @@ build_pipeline(struct northd_context *ctx, struct hmap *datapaths, struct hmap *
                             op->nb->port_security, op->nb->n_port_security,
                             &match);
 
-        pipeline_add(&pc, op->od, D_OUT, 1, 50, ds_cstr(&match),
+        pipeline_add(&pm, op->od, D_OUT, 1, 50, ds_cstr(&match),
                      lport_is_enabled(op->nb) ? "output;" : "drop;");
 
         ds_destroy(&match);
@@ -716,7 +719,7 @@ ovnnb_db_changed(struct northd_context *ctx)
     struct hmap datapaths, ports;
     build_datapaths(ctx, &datapaths);
     build_ports(ctx, &datapaths, &ports);
-    build_pipeline(ctx, &datapaths, &ports);
+    build_pipeline(&datapaths, &ports);
 }
 
 /*
