@@ -14,16 +14,16 @@
  */
 
 
-#ifndef OVN_PIPELINE_H
-#define OVN_PIPELINE_H 1
+#ifndef OVN_RULE_H
+#define OVN_RULE_H 1
 
-/* Pipeline table translation to OpenFlow
- * ======================================
+/* Rule table translation to OpenFlow
+ * ==================================
  *
- * The Pipeline table obtained from the OVN_Southbound database works in terms
- * of logical entities, that is, logical flows among logical datapaths and
- * logical ports.  This code translates these logical flows into OpenFlow flows
- * that, again, work in terms of logical entities implemented through OpenFlow
+ * The Rule table obtained from the OVN_Southbound database works in terms of
+ * logical entities, that is, logical flows among logical datapaths and logical
+ * ports.  This code translates these logical flows into OpenFlow flows that,
+ * again, work in terms of logical entities implemented through OpenFlow
  * extensions (e.g. registers represent the logical input and output ports).
  *
  * Physical-to-logical and logical-to-physical translation are implemented in
@@ -41,8 +41,8 @@ struct uuid;
 #define MFF_LOG_INPORT   MFF_REG6     /* Logical input port (32 bits). */
 #define MFF_LOG_OUTPORT  MFF_REG7     /* Logical output port (32 bits). */
 
-void pipeline_init(void);
-void pipeline_run(struct controller_ctx *);
-void pipeline_destroy(struct controller_ctx *);
+void rule_init(void);
+void rule_run(struct controller_ctx *);
+void rule_destroy(struct controller_ctx *);
 
-#endif /* ovn/pipeline.h */
+#endif /* ovn/rule.h */

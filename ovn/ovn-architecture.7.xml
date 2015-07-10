@@ -343,22 +343,21 @@
     </li>
 
     <li>
-      <code>ovn-northd</code> receives the OVN Northbound database update.
-      In turn, it makes the corresponding updates to the OVN Southbound
-      database, by adding rows to the OVN Southbound database
-      <code>Pipeline</code> table to reflect the new port, e.g. add a
-      flow to recognize that packets destined to the new port's MAC
-      address should be delivered to it, and update the flow that
-      delivers broadcast and multicast packets to include the new port.
-      It also creates a record in the <code>Binding</code> table and
+      <code>ovn-northd</code> receives the OVN Northbound database update.  In
+      turn, it makes the corresponding updates to the OVN Southbound database,
+      by adding rows to the OVN Southbound database <code>Rule</code> table to
+      reflect the new port, e.g. add a flow to recognize that packets destined
+      to the new port's MAC address should be delivered to it, and update the
+      flow that delivers broadcast and multicast packets to include the new
+      port.  It also creates a record in the <code>Binding</code> table and
       populates all its columns except the column that identifies the
       <code>chassis</code>.
     </li>
 
     <li>
       On every hypervisor, <code>ovn-controller</code> receives the
-      <code>Pipeline</code> table updates that <code>ovn-northd</code> made
-      in the previous step.  As long as the VM that owns the VIF is powered off,
+      <code>Rule</code> table updates that <code>ovn-northd</code> made in the
+      previous step.  As long as the VM that owns the VIF is powered off,
       <code>ovn-controller</code> cannot do much; it cannot, for example,
       arrange to send packets to or receive packets from the VIF, because the
       VIF does not actually exist anywhere.
@@ -404,8 +403,8 @@
       <code>Binding</code> table.  This provides <code>ovn-controller</code>
       the physical location of the logical port, so each instance updates the
       OpenFlow tables of its switch (based on logical datapath flows in the OVN
-      DB <code>Pipeline</code> table) so that packets to and from the VIF can
-      be properly handled via tunnels.
+      DB <code>Rule</code> table) so that packets to and from the VIF can be
+      properly handled via tunnels.
     </li>
 
     <li>
@@ -442,17 +441,16 @@
 
     <li>
       <code>ovn-northd</code> receives the OVN Northbound update and in turn
-      updates the OVN Southbound database accordingly, by removing or
-      updating the rows from the OVN Southbound database
-      <code>Pipeline</code> table and <code>Binding</code> table that
-      were related to the now-destroyed VIF.
+      updates the OVN Southbound database accordingly, by removing or updating
+      the rows from the OVN Southbound database <code>Rule</code> table and
+      <code>Binding</code> table that were related to the now-destroyed VIF.
     </li>
 
     <li>
       On every hypervisor, <code>ovn-controller</code> receives the
-      <code>Pipeline</code> table updates that <code>ovn-northd</code> made
-      in the previous step.  <code>ovn-controller</code> updates OpenFlow tables
-      to reflect the update, although there may not be much to do, since the VIF
+      <code>Rule</code> table updates that <code>ovn-northd</code> made in the
+      previous step.  <code>ovn-controller</code> updates OpenFlow tables to
+      reflect the update, although there may not be much to do, since the VIF
       had already become unreachable when it was removed from the
       <code>Binding</code> table in a previous step.
     </li>
@@ -538,13 +536,12 @@
     </li>
 
     <li>
-      <code>ovn-northd</code> receives the OVN Northbound database update.
-      In turn, it makes the corresponding updates to the OVN Southbound
-      database, by adding rows to the OVN Southbound database's
-      <code>Pipeline</code> table to reflect the new port and also by
-      creating a new row in the <code>Binding</code> table and
-      populating all its columns except the column that identifies the
-      <code>chassis</code>.
+      <code>ovn-northd</code> receives the OVN Northbound database update.  In
+      turn, it makes the corresponding updates to the OVN Southbound database,
+      by adding rows to the OVN Southbound database's <code>Rule</code> table
+      to reflect the new port and also by creating a new row in the
+      <code>Binding</code> table and populating all its columns except the
+      column that identifies the <code>chassis</code>.
     </li>
 
     <li>
@@ -580,18 +577,17 @@
 
     <li>
       <code>ovn-northd</code> receives the OVN Northbound update and in turn
-      updates the OVN Southbound database accordingly, by removing or
-      updating the rows from the OVN Southbound database
-      <code>Pipeline</code> table that were related to the now-destroyed
-      CIF.  It also deletes the row in the <code>Binding</code> table
-      for that CIF.
+      updates the OVN Southbound database accordingly, by removing or updating
+      the rows from the OVN Southbound database <code>Rule</code> table that
+      were related to the now-destroyed CIF.  It also deletes the row in the
+      <code>Binding</code> table for that CIF.
     </li>
 
     <li>
       On every hypervisor, <code>ovn-controller</code> receives the
-      <code>Pipeline</code> table updates that <code>ovn-northd</code> made
-      in the previous step.  <code>ovn-controller</code> updates OpenFlow tables
-      to reflect the update.
+      <code>Rule</code> table updates that <code>ovn-northd</code> made in the
+      previous step.  <code>ovn-controller</code> updates OpenFlow tables to
+      reflect the update.
     </li>
   </ol>
 
@@ -601,7 +597,7 @@
     This section describes how a packet travels from ingress into OVN from one
     virtual machine or container to another.  This description focuses on the
     physical treatment of a packet; for a description of the logical life cycle
-    of a packet, please refer to the <code>Pipeline</code> table in
+    of a packet, please refer to the <code>Rule</code> table in
     <code>ovn-sb</code>(5).
   </p>
 
@@ -639,8 +635,9 @@
     <dd>
       A field that denotes the logical port from which the packet will leave
       the logical datapath.  This is initialized to 0 at the beginning of the
-      logical pipeline.  OVN stores this in a Nicira extension register.  (This
-      field is passed across tunnels as part of the tunnel key.)
+      logical ingress pipeline.  OVN stores this in a Nicira extension
+      register.  (This field is passed across tunnels as part of the tunnel
+      key.)
     </dd>
 
     <dt>VLAN ID</dt>
@@ -693,14 +690,14 @@
     <li>
       <p>
         OpenFlow tables 16 through 31 execute the logical ingress pipeline from
-        the <code>Pipeline</code> table in the OVN Southbound database.  These
+        the <code>Rule</code> table in the OVN Southbound database.  These
         tables are expressed entirely in terms of logical concepts like logical
         ports and logical datapaths.  A big part of
         <code>ovn-controller</code>'s job is to translate them into equivalent
         OpenFlow (in particular it translates the table numbers:
-        <code>Pipeline</code> tables 0 through 15 become OpenFlow tables 16
-        through 31).  For a given packet, the logical ingress pipeline
-        eventually executes zero or more <code>output</code> actions:
+        <code>Rule</code> tables 0 through 15 become OpenFlow tables 16 through
+        31).  For a given packet, the logical ingress pipeline eventually
+        executes zero or more <code>output</code> actions:
       </p>
 
       <ul>
@@ -772,7 +769,7 @@
     <li>
       <p>
         OpenFlow tables 48 through 63 execute the logical egress pipeline from
-        the <code>Pipeline</code> table in the OVN Southbound database.  The
+        the <code>Rule</code> table in the OVN Southbound database.  The
         egress pipeline can perform a final stage of validation before packet
         delivery.  Eventually, it may execute an <code>output</code> action,
         which <code>ovn-controller</code> implements by resubmitting to table

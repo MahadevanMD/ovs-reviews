@@ -20,8 +20,9 @@
  * ============================
  *
  * This module implements physical-to-logical and logical-to-physical
- * translation as separate OpenFlow tables that run before and after,
- * respectively, the logical pipeline OpenFlow tables.
+ * translation as separate OpenFlow tables that run before the ingress pipeline
+ * and after the egress pipeline, respectively, as well as to connect the
+ * two pipelines.
  */
 
 struct controller_ctx;

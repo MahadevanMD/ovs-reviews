@@ -14,7 +14,7 @@
  */
 
 #include <config.h>
-#include "pipeline.h"
+#include "rule.h"
 #include "dynamic-string.h"
 #include "ofctrl.h"
 #include "ofp-actions.h"
@@ -26,11 +26,11 @@
 #include "ovn/lib/ovn-sb-idl.h"
 #include "simap.h"
 
-VLOG_DEFINE_THIS_MODULE(pipeline);
+VLOG_DEFINE_THIS_MODULE(rule);
 
 /* Symbol table. */
 
-/* Contains "struct expr_symbol"s for fields supported by OVN pipeline. */
+/* Contains "struct expr_symbol"s for fields supported by OVN rules. */
 static struct shash symtab;
 
 static void
@@ -226,39 +226,37 @@ ldp_destroy(void)
 }
 
 void
-pipeline_init(void)
+rule_init(void)
 {
     symtab_init();
 }
 
-/* Translates logical flows in the Pipeline table in the OVN_SB database
- * into OpenFlow flows.
- *
- * We put the Pipeline flows into OpenFlow tables 16 through 47 (inclusive). */
+/* Translates logical flows in the Rule table in the OVN_SB database into
+ * OpenFlow flows.  See ovn-architecture(7) for more information. */
 void
-pipeline_run(struct controller_ctx *ctx)
+rule_run(struct controller_ctx *ctx)
 {
     struct hmap flows = HMAP_INITIALIZER(&flows);
     uint32_t conj_id_ofs = 1;
 
     ldp_run(ctx);
 
-    const struct sbrec_pipeline *pipeline;
-    SBREC_PIPELINE_FOR_EACH (pipeline, ctx->ovnsb_idl) {
-        /* Find the "struct logical_datapath" asssociated with this Pipeline
-         * row.  If there's no such struct, that must be because no logical
-         * ports are bound to that logical datapath, so there's no point in
-         * maintaining any flows for it anyway, so skip it. */
+    const struct sbrec_rule *rule;
+    SBREC_RULE_FOR_EACH (rule, ctx->ovnsb_idl) {
+        /* Find the "struct logical_datapath" asssociated with this Rule row.
+         * If there's no such struct, that must be because no logical ports are
+         * bound to that logical datapath, so there's no point in maintaining
+         * any flows for it anyway, so skip it. */
         const struct logical_datapath *ldp;
-        ldp = ldp_lookup(pipeline->logical_datapath);
+        ldp = ldp_lookup(rule->logical_datapath);
         if (!ldp) {
             continue;
         }
 
         /* Translate logical table ID to physical table ID. */
-        bool ingress = !strcmp(pipeline->pipeline, "ingress");
-        uint8_t phys_table = pipeline->table_id + (ingress ? 16 : 48);
-        uint8_t next_phys_table = pipeline->table_id < 15 ? phys_table + 1 : 0;
+        bool ingress = !strcmp(rule->pipeline, "ingress");
+        uint8_t phys_table = rule->table_id + (ingress ? 16 : 48);
+        uint8_t next_phys_table = rule->table_id < 15 ? phys_table + 1 : 0;
         uint8_t output_phys_table = ingress ? 32 : 64;
 
         /* Translate OVN actions into OpenFlow actions.
@@ -270,13 +268,13 @@ pipeline_run(struct controller_ctx *ctx)
         char *error;
 
         ofpbuf_use_stub(&ofpacts, ofpacts_stub, sizeof ofpacts_stub);
-        error = actions_parse_string(pipeline->actions, &symtab, &ldp->ports,
+        error = actions_parse_string(rule->actions, &symtab, &ldp->ports,
                                      next_phys_table, output_phys_table,
                                      &ofpacts, &prereqs);
         if (error) {
             static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
             VLOG_WARN_RL(&rl, "error parsing actions \"%s\": %s",
-                         pipeline->actions, error);
+                         rule->actions, error);
             free(error);
             continue;
         }
@@ -285,7 +283,7 @@ pipeline_run(struct controller_ctx *ctx)
         struct hmap matches;
         struct expr *expr;
 
-        expr = expr_parse_string(pipeline->match, &symtab, &error);
+        expr = expr_parse_string(rule->match, &symtab, &error);
         if (!error) {
             if (prereqs) {
                 expr = expr_combine(EXPR_T_AND, expr, prereqs);
@@ -296,7 +294,7 @@ pipeline_run(struct controller_ctx *ctx)
         if (error) {
             static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
             VLOG_WARN_RL(&rl, "error parsing match \"%s\": %s",
-                         pipeline->match, error);
+                         rule->match, error);
             expr_destroy(prereqs);
             ofpbuf_uninit(&ofpacts);
             free(error);
@@ -316,7 +314,7 @@ pipeline_run(struct controller_ctx *ctx)
                 m->match.flow.conj_id += conj_id_ofs;
             }
             if (!m->n) {
-                ofctrl_add_flow(phys_table, pipeline->priority,
+                ofctrl_add_flow(phys_table, rule->priority,
                                 &m->match, &ofpacts);
             } else {
                 uint64_t conj_stubs[64 / 8];
@@ -332,7 +330,7 @@ pipeline_run(struct controller_ctx *ctx)
                     dst->clause = src->clause;
                     dst->n_clauses = src->n_clauses;
                 }
-                ofctrl_add_flow(phys_table, pipeline->priority,
+                ofctrl_add_flow(phys_table, rule->priority,
                                 &m->match, &conj);
                 ofpbuf_uninit(&conj);
             }
@@ -346,7 +344,7 @@ pipeline_run(struct controller_ctx *ctx)
 }
 
 void
-pipeline_destroy(struct controller_ctx *ctx OVS_UNUSED)
+rule_destroy(struct controller_ctx *ctx OVS_UNUSED)
 {
     expr_symtab_destroy(&symtab);
     ldp_destroy();

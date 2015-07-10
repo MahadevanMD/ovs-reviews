@@ -22,7 +22,7 @@
 #include "ovn-controller.h"
 #include "ovn/lib/ovn-sb-idl.h"
 #include "openvswitch/vlog.h"
-#include "pipeline.h"
+#include "rule.h"
 #include "simap.h"
 #include "sset.h"
 #include "vswitch-idl.h"
@@ -234,7 +234,8 @@ physical_run(struct controller_ctx *ctx)
              *
              * For both types of traffic: set MFF_LOG_INPORT to the logical
              * input port, MFF_LOG_DATAPATH to the logical datapath, and
-             * resubmit into the logical pipeline starting at table 16. */
+             * resubmit into the logical ingress pipeline starting at table
+             * 16. */
             match_init_catchall(&match);
             ofpbuf_clear(&ofpacts);
             match_set_in_port(&match, ofport);
@@ -252,7 +253,7 @@ physical_run(struct controller_ctx *ctx)
                 ofpact_put_STRIP_VLAN(&ofpacts);
             }
 
-            /* Resubmit to first logical pipeline table. */
+            /* Resubmit to first logical ingress pipeline table. */
             put_resubmit(16, &ofpacts);
             ofctrl_add_flow(0, tag ? 150 : 100, &match, &ofpacts);
 
@@ -436,8 +437,8 @@ physical_run(struct controller_ctx *ctx)
     /* Table 34, Priority 0.
      * =======================
      *
-     * Resubmit packets that don't output to the ingress port to the egress
-     * pipeline. */
+     * Resubmit packets that don't output to the ingress port to the logical
+     * egress pipeline. */
     struct match match;
     match_init_catchall(&match);
     ofpbuf_clear(&ofpacts);

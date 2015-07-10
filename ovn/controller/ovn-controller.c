@@ -43,7 +43,7 @@
 #include "binding.h"
 #include "chassis.h"
 #include "physical.h"
-#include "pipeline.h"
+#include "rule.h"
 
 VLOG_DEFINE_THIS_MODULE(main);
 
@@ -186,7 +186,7 @@ main(int argc, char *argv[])
     chassis_init(&ctx);
     binding_init(&ctx);
     physical_init(&ctx);
-    pipeline_init();
+    rule_init();
 
     get_initial_snapshot(ctx.ovs_idl);
 
@@ -231,7 +231,7 @@ main(int argc, char *argv[])
 
         chassis_run(&ctx);
         binding_run(&ctx);
-        pipeline_run(&ctx);
+        rule_run(&ctx);
         physical_run(&ctx);
         ofctrl_run(&ctx);
         unixctl_server_run(unixctl);
@@ -248,7 +248,7 @@ main(int argc, char *argv[])
     }
 
     unixctl_server_destroy(unixctl);
-    pipeline_destroy(&ctx);
+    rule_destroy(&ctx);
     ofctrl_destroy();
     binding_destroy(&ctx);
     chassis_destroy(&ctx);

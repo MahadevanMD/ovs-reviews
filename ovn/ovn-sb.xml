@@ -74,7 +74,7 @@
   </p>
 
   <p>
-    <ref table="Pipeline"/> and <ref table="Multicast_Group"/> contain LN data.
+    <ref table="Rule"/> and <ref table="Multicast_Group"/> contain LN data.
   </p>
 
   <h3>Bindings data</h3>
@@ -222,7 +222,7 @@
     </column>
   </table>
 
-  <table name="Pipeline" title="Logical Network Pipeline">
+  <table name="Rule" title="Logical Network Flows">
     <p>
       Each row in this table represents one logical flow.  The cloud management
       system, via its OVN integration, populates this table with logical flows
@@ -276,8 +276,8 @@
     </p>
 
     <p>
-      In more detail, to start, OVN searches the <ref table="Pipeline"/> table
-      for a row with correct <ref column="logical_datapath"/>, a <ref
+      In more detail, to start, OVN searches the <ref table="Rule"/> table for
+      a row with correct <ref column="logical_datapath"/>, a <ref
       column="pipeline"/> of <code>ingress</code>, a <ref column="table_id"/>
       of 0, and a <ref column="match"/> that is true for the packet.  If none
       is found, OVN drops the packet.  If OVN finds more than one, it chooses
@@ -310,7 +310,7 @@
 
     <p>
       To execute the egress pipeline, OVN again searches the <ref
-      table="Pipeline"/> table for a row with correct <ref
+      table="Rule"/> table for a row with correct <ref
       column="logical_datapath"/>, a <ref column="table_id"/> of 0, a <ref
       column="match"/> that is true for the packet, but now looking for a <ref
       column="pipeline"/> of <code>egress</code>.  If no matching row is found,
@@ -803,8 +803,8 @@
     </p>
 
     <p>
-      In the <ref table="Pipeline"/> table, multicast groups may be used as
-      output ports using names of the form <code>_mc<var>n</var></code> where
+      In the <ref table="Rule"/> table, multicast groups may be used as output
+      ports using names of the form <code>_mc<var>n</var></code> where
       <var>n</var> is the group's <ref column="tunnel_key"/>.  For example, the
       action <code>outport = "_mc32768";</code> designates multicast group
       32768 for output.

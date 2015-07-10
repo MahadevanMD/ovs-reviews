@@ -586,17 +586,17 @@ ovn_multicast_add(struct hmap *mcgroups, struct ovn_port *port, uint16_t key)
     mc->ports[mc->n_ports++] = port;
 }
 
-/* Pipeline generation.
+/* Rule generation.
  *
- * This code generates the Pipeline table in the southbound database, as a
- * function of most of the northbound database.
+ * This code generates the Rule table in the southbound database, as a function
+ * of most of the northbound database.
  */
 
-struct ovn_pipeline {
+struct ovn_rule {
     struct hmap_node hmap_node;
 
     struct ovn_datapath *od;
-    enum ovn_direction { D_IN, D_OUT } direction;
+    enum ovn_pipeline { P_IN, P_OUT } pipeline;
     uint8_t table_id;
     uint16_t priority;
     const char *match;
@@ -604,28 +604,28 @@ struct ovn_pipeline {
 };
 
 static size_t
-pipeline_hash(const struct ovn_pipeline *pipeline)
+rule_hash(const struct ovn_rule *rule)
 {
-    size_t hash = uuid_hash(&pipeline->od->key);
-    hash = hash_2words((pipeline->table_id << 16) | pipeline->priority, hash);
-    hash = hash_string(pipeline->match, hash);
-    return hash_string(pipeline->actions, hash);
+    size_t hash = uuid_hash(&rule->od->key);
+    hash = hash_2words((rule->table_id << 16) | rule->priority, hash);
+    hash = hash_string(rule->match, hash);
+    return hash_string(rule->actions, hash);
 }
 
-/* Adds a row with the specified contents to the Pipeline table. */
+/* Adds a row with the specified contents to the Rule table. */
 static void
-pipeline_add(struct hmap *pipeline_map, struct ovn_datapath *od,
-             enum ovn_direction direction, uint8_t table_id, uint16_t priority,
-             const char *match, const char *actions)
+rule_add(struct hmap *rule_map, struct ovn_datapath *od,
+         enum ovn_pipeline pipeline, uint8_t table_id, uint16_t priority,
+         const char *match, const char *actions)
 {
-    struct ovn_pipeline *pipeline = xmalloc(sizeof *pipeline);
-    pipeline->od = od;
-    pipeline->direction = direction;
-    pipeline->table_id = table_id;
-    pipeline->priority = priority;
-    pipeline->match = xstrdup(match);
-    pipeline->actions = xstrdup(actions);
-    hmap_insert(pipeline_map, &pipeline->hmap_node, pipeline_hash(pipeline));
+    struct ovn_rule *rule = xmalloc(sizeof *rule);
+    rule->od = od;
+    rule->pipeline = pipeline;
+    rule->table_id = table_id;
+    rule->priority = priority;
+    rule->match = xstrdup(match);
+    rule->actions = xstrdup(actions);
+    hmap_insert(rule_map, &rule->hmap_node, rule_hash(rule));
 }
 
 /* Appends port security constraints on L2 address field 'eth_addr_field'
@@ -664,10 +664,10 @@ lport_is_enabled(const struct nbrec_logical_port *lport)
     return !lport->enabled || *lport->enabled;
 }
 
-/* Updates the Pipeline table in the OVN_SB database, constructing its contents
+/* Updates the Rule table in the OVN_SB database, constructing its contents
  * based on the OVN_NB database. */
 static void
-build_pipeline(struct hmap *datapaths, struct hmap *ports)
+build_rule(struct hmap *datapaths, struct hmap *ports)
 {
     struct hmap pm = HMAP_INITIALIZER(&pm);
 
@@ -675,16 +675,16 @@ build_pipeline(struct hmap *datapaths, struct hmap *ports)
     struct ovn_datapath *od;
     HMAP_FOR_EACH (od, key_node, datapaths) {
         /* Logical VLANs not supported. */
-        pipeline_add(&pm, od, D_IN, 0, 100, "vlan.present", "drop;");
+        rule_add(&pm, od, P_IN, 0, 100, "vlan.present", "drop;");
 
         /* Broadcast/multicast source address is invalid. */
-        pipeline_add(&pm, od, D_IN, 0, 100, "eth.src[40]", "drop;");
+        rule_add(&pm, od, P_IN, 0, 100, "eth.src[40]", "drop;");
 
         /* Port security flows have priority 50 (see below) and will continue
          * to the next table if packet source is acceptable. */
 
         /* Otherwise drop the packet. */
-        pipeline_add(&pm, od, D_IN, 0, 0, "1", "drop;");
+        rule_add(&pm, od, P_IN, 0, 0, "1", "drop;");
     }
 
     /* Ingress table 0: Ingress port security. */
@@ -696,7 +696,7 @@ build_pipeline(struct hmap *datapaths, struct hmap *ports)
         build_port_security("eth.src",
                             op->nb->port_security, op->nb->n_port_security,
                             &match);
-        pipeline_add(&pm, op->od, D_IN, 0, 50, ds_cstr(&match),
+        rule_add(&pm, op->od, P_IN, 0, 50, ds_cstr(&match),
                      lport_is_enabled(op->nb) ? "next;" : "drop;");
         ds_destroy(&match);
     }
@@ -705,7 +705,7 @@ build_pipeline(struct hmap *datapaths, struct hmap *ports)
      * (priority 100). */
     HMAP_FOR_EACH (od, key_node, datapaths) {
         /* XXX lport_is_enabled() */
-        pipeline_add(&pm, od, D_IN, 1, 100, "eth.dst[40]",
+        rule_add(&pm, od, P_IN, 1, 100, "eth.dst[40]",
                      "outport = \"_FLOOD\"; next;");
     }
 
@@ -725,7 +725,7 @@ build_pipeline(struct hmap *datapaths, struct hmap *ports)
                 ds_put_cstr(&actions, "outport = ");
                 json_string_escape(op->nb->name, &actions);
                 ds_put_cstr(&actions, "; next;");
-                pipeline_add(&pm, op->od, D_IN, 1, 50,
+                rule_add(&pm, op->od, P_IN, 1, 50,
                              ds_cstr(&match), ds_cstr(&actions));
                 ds_destroy(&actions);
                 ds_destroy(&match);
@@ -746,7 +746,7 @@ build_pipeline(struct hmap *datapaths, struct hmap *ports)
         if (od->has_unknown) {
             char *actions = xasprintf("outport = \"_mc%d\"; next;",
                                       MC_UNKNOWN);
-            pipeline_add(&pm, od, D_IN, 1, 0, "1", actions);
+            rule_add(&pm, od, P_IN, 1, 0, "1", actions);
             free(actions);
         }
     }
@@ -760,17 +760,17 @@ build_pipeline(struct hmap *datapaths, struct hmap *ports)
             action = (!strcmp(acl->action, "allow") ||
                       !strcmp(acl->action, "allow-related"))
                 ? "next;" : "drop;";
-            pipeline_add(&pm, od, D_OUT, 0, acl->priority,
+            rule_add(&pm, od, P_OUT, 0, acl->priority,
                          acl->match, action);
         }
     }
     HMAP_FOR_EACH (od, key_node, datapaths) {
-        pipeline_add(&pm, od, D_OUT, 0, 0, "1", "next;");
+        rule_add(&pm, od, P_OUT, 0, 0, "1", "next;");
     }
 
     /* Egress table 1: Egress port security. */
     HMAP_FOR_EACH (od, key_node, datapaths) {
-        pipeline_add(&pm, od, D_OUT, 1, 100, "eth.dst[40]", "output;");
+        rule_add(&pm, od, P_OUT, 1, 100, "eth.dst[40]", "output;");
     }
     HMAP_FOR_EACH (op, key_node, ports) {
         struct ds match;
@@ -782,7 +782,7 @@ build_pipeline(struct hmap *datapaths, struct hmap *ports)
                             op->nb->port_security, op->nb->n_port_security,
                             &match);
 
-        pipeline_add(&pm, op->od, D_OUT, 1, 50, ds_cstr(&match),
+        rule_add(&pm, op->od, P_OUT, 1, 50, ds_cstr(&match),
                      lport_is_enabled(op->nb) ? "output;" : "drop;");
 
         ds_destroy(&match);
@@ -797,7 +797,7 @@ ovnnb_db_changed(struct northd_context *ctx)
     struct hmap datapaths, ports;
     build_datapaths(ctx, &datapaths);
     build_ports(ctx, &datapaths, &ports);
-    build_pipeline(&datapaths, &ports);
+    build_rule(&datapaths, &ports);
 }
 
 /*
@@ -990,16 +990,18 @@ main(int argc, char *argv[])
     ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_tag);
     ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_parent_port);
     ovsdb_idl_add_column(ovnsb_idl, &sbrec_port_binding_col_tunnel_key);
-    ovsdb_idl_add_column(ovnsb_idl, &sbrec_pipeline_col_logical_datapath);
-    ovsdb_idl_omit_alert(ovnsb_idl, &sbrec_pipeline_col_logical_datapath);
-    ovsdb_idl_add_column(ovnsb_idl, &sbrec_pipeline_col_table_id);
-    ovsdb_idl_omit_alert(ovnsb_idl, &sbrec_pipeline_col_table_id);
-    ovsdb_idl_add_column(ovnsb_idl, &sbrec_pipeline_col_priority);
-    ovsdb_idl_omit_alert(ovnsb_idl, &sbrec_pipeline_col_priority);
-    ovsdb_idl_add_column(ovnsb_idl, &sbrec_pipeline_col_match);
-    ovsdb_idl_omit_alert(ovnsb_idl, &sbrec_pipeline_col_match);
-    ovsdb_idl_add_column(ovnsb_idl, &sbrec_pipeline_col_actions);
-    ovsdb_idl_omit_alert(ovnsb_idl, &sbrec_pipeline_col_actions);
+    ovsdb_idl_add_column(ovnsb_idl, &sbrec_rule_col_logical_datapath);
+    ovsdb_idl_omit_alert(ovnsb_idl, &sbrec_rule_col_logical_datapath);
+    ovsdb_idl_add_column(ovnsb_idl, &sbrec_rule_col_pipeline);
+    ovsdb_idl_omit_alert(ovnsb_idl, &sbrec_rule_col_pipeline);
+    ovsdb_idl_add_column(ovnsb_idl, &sbrec_rule_col_table_id);
+    ovsdb_idl_omit_alert(ovnsb_idl, &sbrec_rule_col_table_id);
+    ovsdb_idl_add_column(ovnsb_idl, &sbrec_rule_col_priority);
+    ovsdb_idl_omit_alert(ovnsb_idl, &sbrec_rule_col_priority);
+    ovsdb_idl_add_column(ovnsb_idl, &sbrec_rule_col_match);
+    ovsdb_idl_omit_alert(ovnsb_idl, &sbrec_rule_col_match);
+    ovsdb_idl_add_column(ovnsb_idl, &sbrec_rule_col_actions);
+    ovsdb_idl_omit_alert(ovnsb_idl, &sbrec_rule_col_actions);
 
     /*
      * The loop here just runs the IDL in a loop waiting for the seqno to
