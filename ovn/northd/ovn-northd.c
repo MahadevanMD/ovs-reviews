@@ -75,52 +75,6 @@ Options:\n\
     stream_usage("database", true, true, false);
 }
 
-static int
-compare_strings(const void *a_, const void *b_)
-{
-    char *const *a = a_;
-    char *const *b = b_;
-    return strcmp(*a, *b);
-}
-
-/*
- * Determine whether 2 arrays of MAC addresses are the same.  It's possible that
- * the lists could be *very* long and this check is being done a lot (every
- * time the OVN_Northbound database changes).
- */
-static bool
-macs_equal(char **binding_macs_, size_t b_n_macs,
-           char **lport_macs_, size_t l_n_macs)
-{
-    char **binding_macs, **lport_macs;
-    size_t bytes, i;
-
-    if (b_n_macs != l_n_macs) {
-        return false;
-    }
-
-    bytes = b_n_macs * sizeof binding_macs_[0];
-    binding_macs = xmalloc(bytes);
-    lport_macs = xmalloc(bytes);
-
-    memcpy(binding_macs, binding_macs_, bytes);
-    memcpy(lport_macs, lport_macs_, bytes);
-
-    qsort(binding_macs, b_n_macs, sizeof binding_macs[0], compare_strings);
-    qsort(lport_macs, l_n_macs, sizeof lport_macs[0], compare_strings);
-
-    for (i = 0; i < b_n_macs; i++) {
-        if (strcmp(binding_macs[i], lport_macs[i])) {
-            break;
-        }
-    }
-
-    free(binding_macs);
-    free(lport_macs);
-
-    return (i == b_n_macs) ? true : false;
-}
-
 struct key_node {
     struct hmap_node hmap_node;
     uint32_t key;
@@ -399,7 +353,8 @@ ovn_port_allocate_key(struct ovn_datapath *od)
 }
 
 static void
-join_logical_ports(struct northd_context *ctx, struct hmap *port_map,
+join_logical_ports(struct northd_context *ctx,
+                   struct hmap *dp_map, struct hmap *port_map,
                    struct ovs_list *sb_only, struct ovs_list *nb_only,
                    struct ovs_list *both)
 {
@@ -415,47 +370,32 @@ join_logical_ports(struct northd_context *ctx, struct hmap *port_map,
         list_push_back(sb_only, &op->list);
     }
 
-    const struct nbrec_logical_port *nb;
-    NBREC_LOGICAL_PORT_FOR_EACH (nb, ctx->ovnnb_idl) {
-        struct ovn_port *op = ovn_port_find(port_map, nb->name);
-        if (op) {
-            op->nb = nb;
-            list_remove(&op->list);
-            list_push_back(both, &op->list);
-        } else {
-            op = ovn_port_create(port_map, nb->name, nb, NULL);
-            list_push_back(nb_only, &op->list);
+    struct ovn_datapath *od;
+    HMAP_FOR_EACH (od, key_node, dp_map) {
+        for (size_t i = 0; i < od->nb->n_ports; i++) {
+            const struct nbrec_logical_port *nb = od->nb->ports[i];
+            struct ovn_port *op = ovn_port_find(port_map, nb->name);
+            if (op) {
+                op->nb = nb;
+                list_remove(&op->list);
+                list_push_back(both, &op->list);
+            } else {
+                op = ovn_port_create(port_map, nb->name, nb, NULL);
+                list_push_back(nb_only, &op->list);
+            }
+            op->od = od;
         }
     }
 }
 
-static bool
-parents_equal(const struct sbrec_port_binding *binding,
-              const struct nbrec_logical_port *lport)
+static void
+ovn_port_update_sbrec(const struct ovn_port *op)
 {
-    if (!!binding->parent_port != !!lport->parent_name) {
-        /* One is set and the other is not. */
-        return false;
-    }
-
-    if (binding->parent_port) {
-        /* Both are set. */
-        return strcmp(binding->parent_port, lport->parent_name) ? false : true;
-    }
-
-    /* Both are NULL. */
-    return true;
-}
-
-static bool
-tags_equal(const struct sbrec_port_binding *binding,
-           const struct nbrec_logical_port *lport)
-{
-    if (binding->n_tag != lport->n_tag) {
-        return false;
-    }
-
-    return binding->n_tag ? (binding->tag[0] == lport->tag[0]) : true;
+    sbrec_port_binding_set_datapath(op->sb, op->od->sb);
+    sbrec_port_binding_set_parent_port(op->sb, op->nb->parent_name);
+    sbrec_port_binding_set_tag(op->sb, op->nb->tag, op->nb->n_tag);
+    sbrec_port_binding_set_mac(op->sb, (const char **) op->nb->macs,
+                               op->nb->n_macs);
 }
 
 static void
@@ -464,84 +404,33 @@ build_ports(struct northd_context *ctx, struct hmap *dp_map,
 {
     struct ovs_list sb_ports, nb_ports, both_ports;
 
-    join_logical_ports(ctx, port_map, &sb_ports, &nb_ports, &both_ports);
+    join_logical_ports(ctx, dp_map, port_map,
+                       &sb_ports, &nb_ports, &both_ports);
 
     /* For logical ports that are in both databases, update the southbound
      * record based on northbound data.  Also index the in-use tunnel_keys. */
     struct ovn_port *op, *next;
     LIST_FOR_EACH_SAFE (op, next, list, &both_ports) {
-        struct ovn_datapath *od = ovn_datapath_find(dp_map,
-                                                    &op->nb->header_.uuid);
-        if (!od) {
-            /* We don't have a logical datapath for this logical port.  That
-             * should only happen if we have more logical datapaths than our
-             * encapsulations can support (2**24).
-             *
-             * Delete the southbound port since we can't support it.*/
-            list_remove(&op->list);
-            sbrec_port_binding_delete(op->sb);
-            ovn_port_destroy(port_map, op);
-            continue;
-        }
+        ovn_port_update_sbrec(op);
 
-        if (!macs_equal(op->sb->mac, op->sb->n_mac,
-                        op->nb->macs, op->nb->n_macs)) {
-            sbrec_port_binding_set_mac(op->sb, (const char **) op->nb->macs,
-                                       op->nb->n_macs);
-        }
-        if (!parents_equal(op->sb, op->nb)) {
-            sbrec_port_binding_set_parent_port(op->sb, op->nb->parent_name);
-        }
-        if (!tags_equal(op->sb, op->nb)) {
-            sbrec_port_binding_set_tag(op->sb, op->nb->tag, op->nb->n_tag);
-        }
-        if (op->sb->datapath != od->sb) {
-            sbrec_port_binding_set_datapath(op->sb, od->sb);
-        }
-
-        add_key(&od->port_keys, op->sb->tunnel_key);
-        if (op->sb->tunnel_key > od->max_port_key) {
-            od->max_port_key = op->sb->tunnel_key;
+        add_key(&op->od->port_keys, op->sb->tunnel_key);
+        if (op->sb->tunnel_key > op->od->max_port_key) {
+            op->od->max_port_key = op->sb->tunnel_key;
         }
     }
 
     /* Add southbound record for each unmatched northbound record. */
     LIST_FOR_EACH_SAFE (op, next, list, &nb_ports) {
-        struct ovn_datapath *od = ovn_datapath_find(dp_map,
-                                                    &op->nb->header_.uuid);
-        if (!od || !od->sb) {
-            /* We don't have a logical datapath for this logical port.  That
-             * should only happen if we have more logical datapaths than our
-             * encapsulations can support (2**24).
-             *
-             * Don't create a southbound port since we couldn't implement it
-             * properly anyway.*/
-            list_remove(&op->list);
-            ovn_port_destroy(port_map, op);
-            continue;
-        }
-
-        uint16_t tunnel_key = ovn_port_allocate_key(od);
+        uint16_t tunnel_key = ovn_port_allocate_key(op->od);
         if (!tunnel_key) {
             continue;
         }
 
         op->sb = sbrec_port_binding_insert(ctx->ovnsb_txn);
+        ovn_port_update_sbrec(op);
 
-        struct smap external_ids = SMAP_INITIALIZER(&external_ids);
-        smap_add(&external_ids, "logical-port", op->nb->name);
-        sbrec_datapath_binding_set_external_ids(od->sb, &external_ids);
-        smap_destroy(&external_ids);
-
-        sbrec_port_binding_set_mac(op->sb, (const char **) op->nb->macs,
-                                   op->nb->n_macs);
-        if (op->nb->parent_name && op->nb->n_tag > 0) {
-            sbrec_port_binding_set_parent_port(op->sb, op->nb->parent_name);
-            sbrec_port_binding_set_tag(op->sb, op->nb->tag, op->nb->n_tag);
-        }
-
+        sbrec_port_binding_set_logical_port(op->sb, op->key);
         sbrec_port_binding_set_tunnel_key(op->sb, tunnel_key);
-        sbrec_port_binding_set_datapath(op->sb, od->sb);
     }
 
     /* Delete southbound records without northbound matches. */
@@ -560,10 +449,10 @@ struct multicast_group {
     uint16_t key;               /* OVN_MIN_MULTICAST...OVN_MAX_MULTICAST. */
 };
 
-#define MC_FLOOD "_mc_flood"
+#define MC_FLOOD "_MC_flood"
 static const struct multicast_group mc_flood = { MC_FLOOD, 65535 };
 
-#define MC_UNKNOWN "_mc_unknown"
+#define MC_UNKNOWN "_MC_unknown"
 static const struct multicast_group mc_unknown = { MC_UNKNOWN, 65534 };
 
 static bool
@@ -819,12 +708,13 @@ build_rule(struct northd_context *ctx, struct hmap *datapaths,
     /* Ingress table 1: Destination lookup, broadcast and multicast handling
      * (priority 100). */
     HMAP_FOR_EACH (op, key_node, ports) {
-        ovn_multicast_add(&mcgroups, &mc_flood, op);
+        if (lport_is_enabled(op->nb)) {
+            ovn_multicast_add(&mcgroups, &mc_flood, op);
+        }
     }
     HMAP_FOR_EACH (od, key_node, datapaths) {
-        /* XXX lport_is_enabled() */
         rule_add(&rules, od, P_IN, 1, 100, "eth.dst[40]",
-                 "outport = \""MC_FLOOD"\"; next;");
+                 "outport = \""MC_FLOOD"\"; output;");
     }
 
     /* Ingress table 1: Destination lookup, unicast handling (priority 50), */
@@ -841,7 +731,7 @@ build_rule(struct northd_context *ctx, struct hmap *datapaths,
                 ds_init(&actions);
                 ds_put_cstr(&actions, "outport = ");
                 json_string_escape(op->nb->name, &actions);
-                ds_put_cstr(&actions, "; next;");
+                ds_put_cstr(&actions, "; output;");
                 rule_add(&rules, op->od, P_IN, 1, 50,
                          ds_cstr(&match), ds_cstr(&actions));
                 ds_destroy(&actions);
@@ -862,7 +752,7 @@ build_rule(struct northd_context *ctx, struct hmap *datapaths,
     HMAP_FOR_EACH (od, key_node, datapaths) {
         if (od->has_unknown) {
             rule_add(&rules, od, P_IN, 1, 0, "1",
-                     "outport = \""MC_UNKNOWN"\"; next;");
+                     "outport = \""MC_UNKNOWN"\"; output;");
         }
     }
 

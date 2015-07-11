@@ -213,7 +213,7 @@ ldp_run(struct controller_ctx *ctx)
     const struct sbrec_multicast_group *mc;
     SBREC_MULTICAST_GROUP_FOR_EACH (mc, ctx->ovnsb_idl) {
         struct logical_datapath *ldp = ldp_lookup_or_create(mc->datapath);
-        simap_put(&ldp->ports, mc->name, binding->tunnel_key);
+        simap_put(&ldp->ports, mc->name, mc->tunnel_key);
     }
 
     struct logical_datapath *next_ldp;

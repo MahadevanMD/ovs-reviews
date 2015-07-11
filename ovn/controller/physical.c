@@ -263,8 +263,6 @@ physical_run(struct controller_ctx *ctx)
              * Implements output to local hypervisor.  Each flow matches a
              * logical output port on the local hypervisor, and resubmits to
              * table 34.
-             *
-             * XXX multicast groups
              */
 
             match_init_catchall(&match);
@@ -277,7 +275,32 @@ physical_run(struct controller_ctx *ctx)
 
             /* Resubmit to table 34. */
             put_resubmit(34, &ofpacts);
-            ofctrl_add_flow(34, 100, &match, &ofpacts);
+            ofctrl_add_flow(33, 100, &match, &ofpacts);
+
+            /* Table 64, Priority 50.
+             * =======================
+             *
+             * Deliver the packet to the local vif. */
+            match_init_catchall(&match);
+            ofpbuf_clear(&ofpacts);
+            match_set_metadata(&match, htonll(binding->datapath->tunnel_key));
+            match_set_reg(&match, MFF_LOG_OUTPORT - MFF_REG0,
+                          binding->tunnel_key);
+            if (tag) {
+                /* For containers sitting behind a local vif, tag the packets
+                 * before delivering them. */
+                struct ofpact_vlan_vid *vlan_vid;
+                vlan_vid = ofpact_put_SET_VLAN_VID(&ofpacts);
+                vlan_vid->vlan_vid = tag;
+                vlan_vid->push_vlan_if_needed = true;
+
+                /* A packet might need to hair-pin back into its ingress
+                 * OpenFlow port (to a different logical port, which we already
+                 * checked back in table 34), so set the in_port to zero. */
+                put_load(0, MFF_IN_PORT, 0, 16, &ofpacts);
+            }
+            ofpact_put_OUTPUT(&ofpacts)->port = ofport;
+            ofctrl_add_flow(64, 100, &match, &ofpacts);
         } else {
             /* Table 0, priority 100.
              * ======================
@@ -314,8 +337,6 @@ physical_run(struct controller_ctx *ctx)
              * Implements output to remote hypervisors.  Each flow matches an
              * output port that includes a logical port on a remote hypervisor,
              * and tunnels the packet to that hypervisor.
-             *
-             * XXX multicast groups
              */
 
             match_init_catchall(&match);
@@ -344,30 +365,6 @@ physical_run(struct controller_ctx *ctx)
         match_set_reg(&match, MFF_LOG_INPORT - MFF_REG0, binding->tunnel_key);
         match_set_reg(&match, MFF_LOG_OUTPORT - MFF_REG0, binding->tunnel_key);
         ofctrl_add_flow(34, 100, &match, &ofpacts);
-
-        /* Table 64, Priority 100.
-         * ======================
-         *
-         * Deliver the packet to the local vif. */
-        match_init_catchall(&match);
-        ofpbuf_clear(&ofpacts);
-        match_set_metadata(&match, htonll(binding->datapath->tunnel_key));
-        match_set_reg(&match, MFF_LOG_OUTPORT - MFF_REG0, binding->tunnel_key);
-        if (tag) {
-            /* For containers sitting behind a local vif, tag the packets
-             * before delivering them. */
-            struct ofpact_vlan_vid *vlan_vid;
-            vlan_vid = ofpact_put_SET_VLAN_VID(&ofpacts);
-            vlan_vid->vlan_vid = tag;
-            vlan_vid->push_vlan_if_needed = true;
-
-            /* A packet might need to hair-pin back into its ingress OpenFlow
-             * port (to a different logical port, which we already checked back
-             * in table 34), so set the in_port to zero. */
-            put_load(0, MFF_IN_PORT, 0, 16, &ofpacts);
-        }
-        ofpact_put_OUTPUT(&ofpacts)->port = ofport;
-        ofctrl_add_flow(64, 100, &match, &ofpacts);
     }
 
     const struct sbrec_multicast_group *mc;
