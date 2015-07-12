@@ -54,6 +54,7 @@ static void ovn_flow_log(const struct ovn_flow *, const char *action);
 static void ovn_flow_destroy(struct ovn_flow *);
 
 static ovs_be32 queue_msg(struct ofpbuf *);
+static void queue_flow_mod(struct ofputil_flow_mod *);
 
 /* OpenFlow connection to the switch. */
 static struct rconn *swconn;
@@ -63,53 +64,19 @@ static struct rconn *swconn;
 static unsigned int seqno;
 
 /* Connection state machine. */
-static enum ofctrl_state {
-    /* Newly connected.
-     *
-     * Action: Send a NXT_GENEVE_TABLE_REQUEST and transition to
-     * S_GENEVE_TABLE_REQUESTED.  */
-    S_NEW,
+#define STATES                                  \
+    STATE(S_NEW)                                \
+    STATE(S_GENEVE_TABLE_REQUESTED)             \
+    STATE(S_GENEVE_TABLE_MOD_SENT)              \
+    STATE(S_CLEAR_FLOWS)                        \
+    STATE(S_UPDATE_FLOWS)
+enum ofctrl_state {
+#define STATE(NAME) NAME,
+    STATES
+#undef STATE
+};
 
-    /* If we receive an NXT_GENEVE_TABLE_REPLY:
-     *
-     *     - If it contains our tunnel metadata option, assign its field ID to
-     *       ctx->mff_ovn_geneve and transition to S_CLEAR_FLOWS.
-     *
-     *     - Otherwise, if there is an unused tunnel metadata field ID, send
-     *       NXT_GENEVE_TABLE_MOD and OFPT_BARRIER_REQUEST, and transition to
-     *       S_GENEVE_TABLE_MOD_SENT.
-     *
-     *     - Otherwise, log an error, disable Geneve, and transition to
-     *       S_CLEAR_FLOWS.
-     *
-     * If we receive an OFPT_ERROR:
-     *
-     *     - Log an error, disable Geneve, and transition to S_CLEAR_FLOWS. */
-    S_GENEVE_TABLE_REQUESTED,
-
-    /* If we receive an OFPT_ERROR:
-     *
-     *     - If the error is NXGTMFC_ALREADY_MAPPED or NXGTMFC_DUP_ENTRY, we
-     *       raced with some other controller.  Transition to S_NEW.
-     *
-     *     - Otherwise, log an error, disable Geneve, and transition to
-     *       S_CLEAR_FLOWS.
-     *
-     * If we receive OFPT_BARRIER_REPLY:
-     *
-     *     - Set the tunnel metadata field ID to the one that we requested.
-     *       Transition to S_CLEAR_FLOWS.
-     */
-    S_GENEVE_TABLE_MOD_SENT,
-
-    /* Send an OFPT_TABLE_MOD to clear all flows.  Transition to
-     * S_UPDATE_FLOWS. */
-    S_CLEAR_FLOWS,
-
-    /* Compare the installed flows to the ones we want.  Send OFPT_FLOW_MOD as
-     * necessary. */
-    S_UPDATE_FLOWS,
-} state;
+static enum ofctrl_state state;
 
 static ovs_be32 xid, xid2;
 
@@ -128,8 +95,7 @@ static struct hmap installed_flows;
 static void ovn_flow_table_clear(struct hmap *flow_table);
 static void ovn_flow_table_destroy(struct hmap *flow_table);
 
-static void ofctrl_update_flows(void);
-static void ofctrl_recv(const struct ofp_header *);
+static void ofctrl_recv(const struct ofp_header *, enum ofptype);
 
 void
 ofctrl_init(void)
@@ -139,36 +105,57 @@ ofctrl_init(void)
     hmap_init(&desired_flows);
     hmap_init(&installed_flows);
 }
+
+/* S_NEW, for a new connection.
+ *
+ * Sends NXT_GENEVE_TABLE_REQUEST and transition to
+ * S_GENEVE_TABLE_REQUESTED. */
 
 static void
-run_NEW(void)
+run_S_NEW(void)
 {
     struct ofpbuf *buf = ofpraw_alloc(OFPRAW_NXT_GENEVE_TABLE_REQUEST,
                                       rconn_get_version(swconn), 0);
     xid = queue_msg(buf);
     state = S_GENEVE_TABLE_REQUESTED;
 }
-
 static void
-recv_NEW(const struct ofp_header *oh OVS_UNUSED, enum ofptype type OVS_UNUSED)
+recv_S_NEW(const struct ofp_header *oh OVS_UNUSED,
+           enum ofptype type OVS_UNUSED)
 {
     OVS_NOT_REACHED();
 }
+
+/* S_GENEVE_TABLE_REQUESTED, when NXT_GENEVE_TABLE_REQUEST has been sent
+ * and we're waiting for a reply.
+ *
+ * If we receive an NXT_GENEVE_TABLE_REPLY:
+ *
+ *     - If it contains our tunnel metadata option, assign its field ID to
+ *       ctx->mff_ovn_geneve and transition to S_CLEAR_FLOWS.
+ *
+ *     - Otherwise, if there is an unused tunnel metadata field ID, send
+ *       NXT_GENEVE_TABLE_MOD and OFPT_BARRIER_REQUEST, and transition to
+ *       S_GENEVE_TABLE_MOD_SENT.
+ *
+ *     - Otherwise, log an error, disable Geneve, and transition to
+ *       S_CLEAR_FLOWS.
+ *
+ * If we receive an OFPT_ERROR:
+ *
+ *     - Log an error, disable Geneve, and transition to S_CLEAR_FLOWS. */
 
 static void
-run_GENEVE_TABLE_REQUESTED(void)
+run_S_GENEVE_TABLE_REQUESTED(void)
 {
 }
 
 static void
-recv_GENEVE_TABLE_REQUESTED(const struct ofp_header *oh, enum ofptype type)
+recv_S_GENEVE_TABLE_REQUESTED(const struct ofp_header *oh, enum ofptype type)
 {
     if (oh->xid != xid) {
-        ofctrl_recv(oh);
-        return;
-    }
-
-    if (type == OFPTYPE_NXT_GENEVE_TABLE_REPLY) {
+        ofctrl_recv(oh, type);
+    } else if (type == OFPTYPE_NXT_GENEVE_TABLE_REPLY) {
         struct ofputil_geneve_table_reply reply;
         enum ofperr error = ofputil_decode_geneve_table_reply(oh, &reply);
         if (error) {
@@ -193,7 +180,7 @@ recv_GENEVE_TABLE_REQUESTED(const struct ofp_header *oh, enum ofptype type)
                              map->option_len, map->index);
                     goto error;
                 } else {
-                    ctx->mff_ovn_geneve = MFF_TUN_METADATA0 + map->index;
+                    //ctx->mff_ovn_geneve = MFF_TUN_METADATA0 + map->index;
                     state = S_CLEAR_FLOWS;
                     return;
                 }
@@ -211,7 +198,7 @@ recv_GENEVE_TABLE_REQUESTED(const struct ofp_header *oh, enum ofptype type)
         }
 
         unsigned int index = rightmost_1bit_idx(md_free);
-        ctx->mff_ovn_geneve = MFF_TUN_METADATA0 + index;
+        //ctx->mff_ovn_geneve = MFF_TUN_METADATA0 + index;
         struct ofputil_geneve_map gm;
         gm.option_class = OVN_GENEVE_CLASS;
         gm.option_type = OVN_GENEVE_TYPE;
@@ -227,22 +214,201 @@ recv_GENEVE_TABLE_REQUESTED(const struct ofp_header *oh, enum ofptype type)
                                                         &gtm));
         xid2 = queue_msg(ofputil_encode_barrier_request(OFP13_VERSION));
         state = S_GENEVE_TABLE_MOD_SENT;
-        return;
     } else if (type == OFPTYPE_ERROR) {
         VLOG_ERR("switch refused to allocate Geneve option (%s)",
-                 ofperr_to_string(ofperr_decode_msg(oh)));
+                 ofperr_to_string(ofperr_decode_msg(oh, NULL)));
+        goto error;
+    } else {
+        char *s = ofp_to_string(oh, ntohs(oh->length), 1);
+        VLOG_ERR("unexpected reply to Geneve table request (%s)",
+                 s);
+        free(s);
+        goto error;
+    }
+    return;
+
+error:
+    //ctx->mff_ovn_geneve = 0;
+    state = S_CLEAR_FLOWS;
+}
+
+/* S_GENEVE_TABLE_MOD_SENT, when NXT_GENEVE_TABLE_MOD and OFPT_BARRIER_REQUEST
+ * have been sent and we're waiting for a reply to one or the other.
+ *
+ * If we receive an OFPT_ERROR:
+ *
+ *     - If the error is NXGTMFC_ALREADY_MAPPED or NXGTMFC_DUP_ENTRY, we
+ *       raced with some other controller.  Transition to S_NEW.
+ *
+ *     - Otherwise, log an error, disable Geneve, and transition to
+ *       S_CLEAR_FLOWS.
+ *
+ * If we receive OFPT_BARRIER_REPLY:
+ *
+ *     - Set the tunnel metadata field ID to the one that we requested.
+ *       Transition to S_CLEAR_FLOWS.
+ */
+
+static void
+run_S_GENEVE_TABLE_MOD_SENT(void)
+{
+}
+
+static void
+recv_S_GENEVE_TABLE_MOD_SENT(const struct ofp_header *oh, enum ofptype type)
+{
+    if (oh->xid != xid && oh->xid != xid2) {
+        ofctrl_recv(oh, type);
+    } else if (oh->xid == xid2 && type == OFPTYPE_BARRIER_REPLY) {
+        state = S_CLEAR_FLOWS;
+    } else if (oh->xid == xid && type == OFPTYPE_ERROR) {
+        enum ofperr error = ofperr_decode_msg(oh, NULL);
+        if (error == OFPERR_NXGTMFC_ALREADY_MAPPED ||
+            error == OFPERR_NXGTMFC_DUP_ENTRY) {
+            VLOG_INFO("raced with another controller adding "
+                      "Geneve option (%s); trying again",
+                      ofperr_to_string(error));
+            state = S_NEW;
+        } else {
+            VLOG_ERR("error adding Geneve option (%s)",
+                     ofperr_to_string(error));
+            goto error;
+        }
     } else {
         char *s = ofp_to_string(oh, ntohs(oh->length), 1);
         VLOG_ERR("unexpected reply to Geneve option allocation request (%s)",
                  s);
         free(s);
+        goto error;
     }
+    return;
 
 error:
-    ctx->mff_ovn_geneve = 0;
     state = S_CLEAR_FLOWS;
 }
+
+/* S_CLEAR_FLOWS, after we've established a Geneve metadata field ID and it's
+ * time to set up some flows.
+ *
+ * Sends an OFPT_TABLE_MOD to clear all flows, then transitions to
+ * S_UPDATE_FLOWS. */
 
+static void
+run_S_CLEAR_FLOWS(void)
+{
+    /* Send a flow_mod to delete all flows. */
+    struct ofputil_flow_mod fm = {
+        .match = MATCH_CATCHALL_INITIALIZER,
+        .table_id = OFPTT_ALL,
+        .command = OFPFC_DELETE,
+    };
+    queue_flow_mod(&fm);
+    VLOG_DBG("clearing all flows");
+
+    /* Clear installed_flows, to match the state of the switch. */
+    ovn_flow_table_clear(&installed_flows);
+
+    state = S_UPDATE_FLOWS;
+}
+
+static void
+recv_S_CLEAR_FLOWS(const struct ofp_header *oh OVS_UNUSED,
+                   enum ofptype type OVS_UNUSED)
+{
+}
+
+/* S_UPDATE_FLOWS, for maintaining the flow table over time.
+ *
+ * Compare the installed flows to the ones we want.  Send OFPT_FLOW_MOD as
+ * necessary.
+ *
+ * This is a terminal state.  We only transition out of it if the connection
+ * drops. */
+
+static void
+run_S_UPDATE_FLOWS(void)
+{
+    if (rconn_packet_counter_n_packets(tx_counter)) {
+        return;
+    }
+
+    /* Iterate through all of the installed flows.  If any of them are no
+     * longer desired, delete them; if any of them should have different
+     * actions, update them. */
+    struct ovn_flow *i, *next;
+    HMAP_FOR_EACH_SAFE (i, next, hmap_node, &installed_flows) {
+        struct ovn_flow *d = ovn_flow_lookup(&desired_flows, i);
+        if (!d) {
+            /* Installed flow is no longer desirable.  Delete it from the
+             * switch and from installed_flows. */
+            struct ofputil_flow_mod fm;
+            memset(&fm, 0, sizeof fm);
+            fm.match = i->match;
+            fm.priority = i->priority;
+            fm.table_id = i->table_id;
+            fm.command = OFPFC_DELETE_STRICT;
+            queue_flow_mod(&fm);
+            ovn_flow_log(i, "removing");
+
+            hmap_remove(&installed_flows, &i->hmap_node);
+            ovn_flow_destroy(i);
+        } else {
+            if (!ofpacts_equal(i->ofpacts, i->ofpacts_len,
+                               d->ofpacts, d->ofpacts_len)) {
+                /* Update actions in installed flow. */
+                struct ofputil_flow_mod fm;
+                memset(&fm, 0, sizeof fm);
+                fm.match = i->match;
+                fm.priority = i->priority;
+                fm.table_id = i->table_id;
+                fm.ofpacts = d->ofpacts;
+                fm.ofpacts_len = d->ofpacts_len;
+                fm.command = OFPFC_MODIFY_STRICT;
+                queue_flow_mod(&fm);
+                ovn_flow_log(i, "updating");
+
+                /* Replace 'i''s actions by 'd''s. */
+                free(i->ofpacts);
+                i->ofpacts = d->ofpacts;
+                i->ofpacts_len = d->ofpacts_len;
+                d->ofpacts = NULL;
+                d->ofpacts_len = 0;
+            }
+
+            hmap_remove(&desired_flows, &d->hmap_node);
+            ovn_flow_destroy(d);
+        }
+    }
+
+    /* The previous loop removed from desired_flows all of the flows that are
+     * already installed.  Thus, any flows remaining in desired_flows need to
+     * be added to the flow table. */
+    struct ovn_flow *d;
+    HMAP_FOR_EACH_SAFE (d, next, hmap_node, &desired_flows) {
+        /* Send flow_mod to add flow. */
+        struct ofputil_flow_mod fm;
+        memset(&fm, 0, sizeof fm);
+        fm.match = d->match;
+        fm.priority = d->priority;
+        fm.table_id = d->table_id;
+        fm.ofpacts = d->ofpacts;
+        fm.ofpacts_len = d->ofpacts_len;
+        fm.command = OFPFC_ADD;
+        queue_flow_mod(&fm);
+        ovn_flow_log(d, "adding");
+
+        /* Move 'd' from desired_flows to installed_flows. */
+        hmap_remove(&desired_flows, &d->hmap_node);
+        hmap_insert(&installed_flows, &d->hmap_node, d->hmap_node.hash);
+    }
+}
+
+static void
+recv_S_UPDATE_FLOWS(const struct ofp_header *oh OVS_UNUSED,
+                    enum ofptype type OVS_UNUSED)
+{
+}
+
 /* This function should be called in the main loop after anything that updates
  * the flow table (e.g. after calls to ofctrl_clear_flows() and
  * ofctrl_add_flow()). */
@@ -268,184 +434,42 @@ ofctrl_run(struct controller_ctx *ctx)
 
     enum ofctrl_state old_state;
     do {
-        old_state = rc->state;
-        switch (rc->state) {
-#define STATE(NAME, VALUE) case S_##NAME: run_##NAME(rc); break;
+        old_state = state;
+        switch (state) {
+#define STATE(NAME) case NAME: run_##NAME(); break;
             STATES
 #undef STATE
         default:
             OVS_NOT_REACHED();
         }
-    } while (rc->state != old_state);
+    } while (state != old_state);
 
-    for (int i = 0; rc->state == old_state && i < 50; i++) {
+    for (int i = 0; state == old_state && i < 50; i++) {
         struct ofpbuf *msg = rconn_recv(swconn);
         if (!msg) {
             break;
         }
 
-        switch (rc->state) {
-#define STATE(NAME, VALUE) case S_##NAME: recv_##NAME(rc); break;
-            STATES
+        const struct ofp_header *oh = msg->data;
+        enum ofptype type;
+        enum ofperr error;
+
+        error = ofptype_decode(&type, oh);
+        if (!error) {
+            switch (state) {
+#define STATE(NAME) case NAME: recv_##NAME(oh, type); break;
+                STATES
 #undef STATE
-        default:
-            OVS_NOT_REACHED();
-        }
-
-        ofpbuf_delete(msg);
-    }
-
-    switch (state) {
-    case S_NEW:
-        break;
-
-    case S_GENEVE_TABLE_REQUESTED:
-        buf = rconn_recv(swconn);
-        if (buf) {
-            msg = buf->data;
-            if (msg->xid == xid) {
-                enum ofptype type;
-                struct ofpbuf b;
-
-                b = *buf;
-                if (ofptype_pull(&type, &b)) {
-                    /* XXX */
-                } else if (type == OFPTYPE_NXT_GENEVE_TABLE_REPLY) {
-                    struct ofputil_geneve_table_reply reply;
-
-                    error = ofputil_decode_geneve_table_reply(msg, &reply);
-                    if (!error) {
-                        const struct ofputil_geneve_map *map;
-                        uint64_t md_free = UINT64_MAX;
-                        BUILD_ASSERTE(TUN_METADATA_NUM_OPTS == 64);
-
-                        LIST_FOR_EACH (map, list_node, &reply.mappings) {
-                            if (map->option_class == OVN_GENEVE_CLASS
-                                && map->option_type == OVN_GENEVE_TYPE
-                                && map->option_len == OVN_GENEVE_LEN) {
-                                if (map->index >= TUN_METADATA_NUM_OPTS) {
-                                    /* XXX */
-                                } else {
-                                    ctx->mff_ovn_geneve = MFF_TUN_METADATA0 + map->index;
-                                    state = S_CLEAR_FLOWS;
-                                    goto next;
-                                }
-                            }
-
-                            if (map->index < TUN_METADATA_NUM_OPTS) {
-                                md_free &= ~(UINT64_C(1) << map->index);
-                            }
-                        }
-
-                        VLOG_DBG("OVN Geneve option not found");
-                        if (!md_free) {
-                            /* XXX */
-                        }
-
-                        unsigned int index = rightmost_1bit_idx(md_free);
-                        ctx->mff_ovn_geneve = MFF_TUN_METADATA0 + index;
-                        struct ofputil_geneve_map gm;
-                        gm.option_class = OVN_GENEVE_CLASS;
-                        gm.option_type = OVN_GENEVE_TYPE;
-                        gm.option_len = OVN_GENEVE_LEN;
-                        gm.index = index;
-
-                        struct ofputil_geneve_table_mod gtm;
-                        gtm.command = NXGTMC_ADD;
-                        list_init(&gtm.mappings);
-                        list_push_back(&gtm.mappings, &gm.list_node);
-
-                        buf = ofputil_encode_geneve_table_mod(OFP13_VERSION,
-                                                              &gtm);
-                        msg = buf->data;
-                        xid = msg->xid;
-                        queue_msg(buf);
-
-                        buf = ofputil_encode_barrier_request(OFP13_VERSION);
-                        msg = buf->data;
-                        xid2 = msg->xid;
-                        queue_msg(buf);
-
-                        state = S_GENEVE_TABLE_MOD_SENT;
-
-                        next: ;
-                    }
-
-                } else if (type == OFPTYPE_ERROR) {
-                    /* XXX */
-                } else {
-                    /* XXX */
-
-                }
-            } else {
-                ofctrl_recv(buf);
+            default:
+                OVS_NOT_REACHED();
             }
-            ofpbuf_delete(buf);
-        }
-        break;
-
-    case S_GENEVE_TABLE_MOD_SENT:
-        buf = rconn_recv(swconn);
-        if (buf) {
-            msg = buf->data;
-            if (msg->xid == xid || msg->xid == xid2) {
-                enum ofptype type;
-                struct ofpbuf b;
-
-                b = *buf;
-                if (ofptype_pull(&type, &b)) {
-                    /* XXX */
-                } else if (msg->xid == xid2 && type == OFPTYPE_BARRIER_REPLY) {
-                    state = S_CLEAR_FLOWS;
-                } else if (msg->xid == xid1 && type == OFPTYPE_ERROR) {
-                    error = ofperr_decode_msg(msg);
-                    if (error == OFPERR_NXGTMFC_ALREADY_MAPPED ||
-                        error == OFPERR_NXGTMFC_DUP_ENTRY) {
-                        VLOG_INFO("raced with another controller adding "
-                                  "Geneve option (%s); trying again",
-                                  ofperr_to_string(error));
-                        state = S_NEW;
-                    } else {
-                        /* XXX */
-                    }
-                }
-            } else {
-                ofctrl_recv(buf);
-            }
-            ofpbuf_delete(buf);
-        }
-        break;
-
-    case S_CLEAR_FLOWS:
-        /* Send a flow_mod to delete all flows. */
-        struct ofputil_flow_mod fm = {
-            .match = MATCH_CATCHALL_INITIALIZER,
-            .table_id = OFPTT_ALL,
-            .command = OFPFC_DELETE,
-        };
-        queue_flow_mod(&fm);
-        VLOG_DBG("clearing all flows");
-
-        /* Clear installed_flows, to match the state of the switch. */
-        ovn_flow_table_clear(&installed_flows);
-
-        state = S_UPDATE_FLOWS;
-        break;
-    }
-    
-
-
-    if (!rconn_packet_counter_n_packets(tx_counter)) {
-        ofctrl_update_flows();
-    }
-
-    for (int i = 0; i < 50; i++) {
-        struct ofpbuf *msg = rconn_recv(swconn);
-        if (!msg) {
-            break;
+        } else {
+            char *s = ofp_to_string(oh, ntohs(oh->length), 1);
+            VLOG_WARN("could not decode OpenFlow message (%s): %s",
+                      ofperr_to_string(error), s);
+            free(s);
         }
 
-        ofctrl_recv(msg);
         ofpbuf_delete(msg);
     }
 }
@@ -476,102 +500,18 @@ queue_msg(struct ofpbuf *msg)
 }
 
 static void
-ofctrl_recv(const struct ofpbuf *msg)
+ofctrl_recv(const struct ofp_header *oh, enum ofptype type)
 {
-    enum ofptype type;
-    struct ofpbuf b;
-
-    b = *msg;
-    if (ofptype_pull(&type, &b)) {
-        return;
-    }
-
-    switch (type) {
-    case OFPTYPE_ECHO_REQUEST:
-        queue_msg(make_echo_reply(msg->data));
-        break;
-
-    case OFPTYPE_ECHO_REPLY:
-    case OFPTYPE_PACKET_IN:
-    case OFPTYPE_PORT_STATUS:
-    case OFPTYPE_FLOW_REMOVED:
-        /* Nothing to do. */
-        break;
-
-    case OFPTYPE_HELLO:
-    case OFPTYPE_ERROR:
-    case OFPTYPE_FEATURES_REQUEST:
-    case OFPTYPE_FEATURES_REPLY:
-    case OFPTYPE_GET_CONFIG_REQUEST:
-    case OFPTYPE_GET_CONFIG_REPLY:
-    case OFPTYPE_SET_CONFIG:
-    case OFPTYPE_PACKET_OUT:
-    case OFPTYPE_FLOW_MOD:
-    case OFPTYPE_GROUP_MOD:
-    case OFPTYPE_PORT_MOD:
-    case OFPTYPE_TABLE_MOD:
-    case OFPTYPE_BARRIER_REQUEST:
-    case OFPTYPE_BARRIER_REPLY:
-    case OFPTYPE_QUEUE_GET_CONFIG_REQUEST:
-    case OFPTYPE_QUEUE_GET_CONFIG_REPLY:
-    case OFPTYPE_DESC_STATS_REQUEST:
-    case OFPTYPE_DESC_STATS_REPLY:
-    case OFPTYPE_FLOW_STATS_REQUEST:
-    case OFPTYPE_FLOW_STATS_REPLY:
-    case OFPTYPE_AGGREGATE_STATS_REQUEST:
-    case OFPTYPE_AGGREGATE_STATS_REPLY:
-    case OFPTYPE_TABLE_STATS_REQUEST:
-    case OFPTYPE_TABLE_STATS_REPLY:
-    case OFPTYPE_PORT_STATS_REQUEST:
-    case OFPTYPE_PORT_STATS_REPLY:
-    case OFPTYPE_QUEUE_STATS_REQUEST:
-    case OFPTYPE_QUEUE_STATS_REPLY:
-    case OFPTYPE_PORT_DESC_STATS_REQUEST:
-    case OFPTYPE_PORT_DESC_STATS_REPLY:
-    case OFPTYPE_ROLE_REQUEST:
-    case OFPTYPE_ROLE_REPLY:
-    case OFPTYPE_ROLE_STATUS:
-    case OFPTYPE_SET_FLOW_FORMAT:
-    case OFPTYPE_FLOW_MOD_TABLE_ID:
-    case OFPTYPE_SET_PACKET_IN_FORMAT:
-    case OFPTYPE_FLOW_AGE:
-    case OFPTYPE_SET_CONTROLLER_ID:
-    case OFPTYPE_FLOW_MONITOR_STATS_REQUEST:
-    case OFPTYPE_FLOW_MONITOR_STATS_REPLY:
-    case OFPTYPE_FLOW_MONITOR_CANCEL:
-    case OFPTYPE_FLOW_MONITOR_PAUSED:
-    case OFPTYPE_FLOW_MONITOR_RESUMED:
-    case OFPTYPE_GET_ASYNC_REQUEST:
-    case OFPTYPE_GET_ASYNC_REPLY:
-    case OFPTYPE_SET_ASYNC_CONFIG:
-    case OFPTYPE_METER_MOD:
-    case OFPTYPE_GROUP_STATS_REQUEST:
-    case OFPTYPE_GROUP_STATS_REPLY:
-    case OFPTYPE_GROUP_DESC_STATS_REQUEST:
-    case OFPTYPE_GROUP_DESC_STATS_REPLY:
-    case OFPTYPE_GROUP_FEATURES_STATS_REQUEST:
-    case OFPTYPE_GROUP_FEATURES_STATS_REPLY:
-    case OFPTYPE_METER_STATS_REQUEST:
-    case OFPTYPE_METER_STATS_REPLY:
-    case OFPTYPE_METER_CONFIG_STATS_REQUEST:
-    case OFPTYPE_METER_CONFIG_STATS_REPLY:
-    case OFPTYPE_METER_FEATURES_STATS_REQUEST:
-    case OFPTYPE_METER_FEATURES_STATS_REPLY:
-    case OFPTYPE_TABLE_FEATURES_STATS_REQUEST:
-    case OFPTYPE_TABLE_FEATURES_STATS_REPLY:
-    case OFPTYPE_TABLE_DESC_REQUEST:
-    case OFPTYPE_TABLE_DESC_REPLY:
-    case OFPTYPE_BUNDLE_CONTROL:
-    case OFPTYPE_BUNDLE_ADD_MESSAGE:
-    case OFPTYPE_NXT_GENEVE_TABLE_MOD:
-    case OFPTYPE_NXT_GENEVE_TABLE_REQUEST:
-    case OFPTYPE_NXT_GENEVE_TABLE_REPLY:
-    default:
-        /* Messages that are generally unexpected. */
+    if (type == OFPTYPE_ECHO_REQUEST) {
+        queue_msg(make_echo_reply(oh));
+    } else if (type != OFPTYPE_ECHO_REPLY &&
+               type != OFPTYPE_PACKET_IN &&
+               type != OFPTYPE_PORT_STATUS &&
+               type != OFPTYPE_FLOW_REMOVED) {
         if (VLOG_IS_DBG_ENABLED()) {
             static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(30, 300);
 
-            char *s = ofp_to_string(msg->data, msg->size, 2);
+            char *s = ofp_to_string(oh, ntohs(oh->length), 2);
             VLOG_DBG_RL(&rl, "OpenFlow packet ignored: %s", s);
             free(s);
         }
@@ -709,78 +649,4 @@ queue_flow_mod(struct ofputil_flow_mod *fm)
     fm->out_port = OFPP_ANY;
     fm->out_group = OFPG_ANY;
     queue_msg(ofputil_encode_flow_mod(fm, OFPUTIL_P_OF13_OXM));
-}
-
-static void
-ofctrl_update_flows(void)
-{
-    /* Iterate through all of the installed flows.  If any of them are no
-     * longer desired, delete them; if any of them should have different
-     * actions, update them. */
-    struct ovn_flow *i, *next;
-    HMAP_FOR_EACH_SAFE (i, next, hmap_node, &installed_flows) {
-        struct ovn_flow *d = ovn_flow_lookup(&desired_flows, i);
-        if (!d) {
-            /* Installed flow is no longer desirable.  Delete it from the
-             * switch and from installed_flows. */
-            struct ofputil_flow_mod fm;
-            memset(&fm, 0, sizeof fm);
-            fm.match = i->match;
-            fm.priority = i->priority;
-            fm.table_id = i->table_id;
-            fm.command = OFPFC_DELETE_STRICT;
-            queue_flow_mod(&fm);
-            ovn_flow_log(i, "removing");
-
-            hmap_remove(&installed_flows, &i->hmap_node);
-            ovn_flow_destroy(i);
-        } else {
-            if (!ofpacts_equal(i->ofpacts, i->ofpacts_len,
-                               d->ofpacts, d->ofpacts_len)) {
-                /* Update actions in installed flow. */
-                struct ofputil_flow_mod fm;
-                memset(&fm, 0, sizeof fm);
-                fm.match = i->match;
-                fm.priority = i->priority;
-                fm.table_id = i->table_id;
-                fm.ofpacts = d->ofpacts;
-                fm.ofpacts_len = d->ofpacts_len;
-                fm.command = OFPFC_MODIFY_STRICT;
-                queue_flow_mod(&fm);
-                ovn_flow_log(i, "updating");
-
-                /* Replace 'i''s actions by 'd''s. */
-                free(i->ofpacts);
-                i->ofpacts = d->ofpacts;
-                i->ofpacts_len = d->ofpacts_len;
-                d->ofpacts = NULL;
-                d->ofpacts_len = 0;
-            }
-
-            hmap_remove(&desired_flows, &d->hmap_node);
-            ovn_flow_destroy(d);
-        }
-    }
-
-    /* The previous loop removed from desired_flows all of the flows that are
-     * already installed.  Thus, any flows remaining in desired_flows need to
-     * be added to the flow table. */
-    struct ovn_flow *d;
-    HMAP_FOR_EACH_SAFE (d, next, hmap_node, &desired_flows) {
-        /* Send flow_mod to add flow. */
-        struct ofputil_flow_mod fm;
-        memset(&fm, 0, sizeof fm);
-        fm.match = d->match;
-        fm.priority = d->priority;
-        fm.table_id = d->table_id;
-        fm.ofpacts = d->ofpacts;
-        fm.ofpacts_len = d->ofpacts_len;
-        fm.command = OFPFC_ADD;
-        queue_flow_mod(&fm);
-        ovn_flow_log(d, "adding");
-
-        /* Move 'd' from desired_flows to installed_flows. */
-        hmap_remove(&desired_flows, &d->hmap_node);
-        hmap_insert(&installed_flows, &d->hmap_node, d->hmap_node.hash);
-    }
 }
