@@ -17,6 +17,7 @@
 #ifndef OVN_CONTROLLER_H
 #define OVN_CONTROLLER_H 1
 
+#include "meta-flow.h"
 #include "ovn/lib/ovn-sb-idl.h"
 
 struct controller_ctx {
@@ -26,6 +27,11 @@ struct controller_ctx {
     struct ovsdb_idl *ovs_idl;
 
     const struct ovsrec_bridge *br_int;
+
+    /* The field ID to be used in Geneve for MFF_LOG_INPORT and
+     * MFF_LOG_OUTPORT.  Generally MFF_TUN_METADATA0 but a different ID may be
+     * negotiated if other Geneve metadata fields are in use in OVS. */
+    enum mf_field_id mff_ovn_geneve;
 };
 
 static inline const struct sbrec_chassis *

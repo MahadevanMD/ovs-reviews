@@ -105,14 +105,15 @@ put_resubmit(uint8_t table_id, struct ofpbuf *ofpacts)
 }
 
 static void
-put_encapsulation(const struct chassis_tunnel *tun,
+put_encapsulation(const struct controller_ctx *ctx,
+                  const struct chassis_tunnel *tun,
                   const struct sbrec_datapath_binding *datapath,
                   uint16_t outport, struct ofpbuf *ofpacts)
 {
     if (tun->type == GENEVE) {
         put_load(datapath->tunnel_key, MFF_TUN_ID, 0, 24, ofpacts);
-        put_load(outport, MFF_TUN_METADATA0, 0, 32, ofpacts);
-        put_move(MFF_LOG_INPORT, 0, MFF_TUN_METADATA0, 16, 15, ofpacts);
+        put_load(outport, ctx->mff_ovn_geneve, 0, 32, ofpacts);
+        put_move(MFF_LOG_INPORT, 0, ctx->mff_ovn_geneve, 16, 15, ofpacts);
     } else if (tun->type == STT) {
         put_load(datapath->tunnel_key | (outport << 24), MFF_TUN_ID, 0, 64,
                  ofpacts);
@@ -316,9 +317,9 @@ physical_run(struct controller_ctx *ctx)
             ofpbuf_clear(&ofpacts);
             if (tun->type == GENEVE) {
                 put_move(MFF_TUN_ID, 0,  MFF_LOG_DATAPATH, 0, 24, &ofpacts);
-                put_move(MFF_TUN_METADATA0, 16, MFF_LOG_INPORT, 0, 15,
+                put_move(ctx->mff_ovn_geneve, 16, MFF_LOG_INPORT, 0, 15,
                          &ofpacts);
-                put_move(MFF_TUN_METADATA0, 0, MFF_LOG_OUTPORT, 0, 16,
+                put_move(ctx->mff_ovn_geneve, 0, MFF_LOG_OUTPORT, 0, 16,
                          &ofpacts);
             } else if (tun->type == STT) {
                 put_move(MFF_TUN_ID, 40, MFF_LOG_INPORT,   0, 15, &ofpacts);
@@ -347,7 +348,7 @@ physical_run(struct controller_ctx *ctx)
             match_set_reg(&match, MFF_LOG_OUTPORT - MFF_REG0,
                           binding->tunnel_key);
 
-            put_encapsulation(tun, binding->datapath,
+            put_encapsulation(ctx, tun, binding->datapath,
                               binding->tunnel_key, &ofpacts);
 
             /* Output to tunnel. */
@@ -414,7 +415,7 @@ physical_run(struct controller_ctx *ctx)
                 }
 
                 if (!prev || tun->type != prev->type) {
-                    put_encapsulation(tun, mc->datapath, mc->tunnel_key,
+                    put_encapsulation(ctx, tun, mc->datapath, mc->tunnel_key,
                                       &ofpacts);
                     prev = tun;
                 }

@@ -27,6 +27,13 @@
 
 struct controller_ctx;
 
+/* OVN Geneve option information.
+ *
+ * Keep these in sync with the documentation in ovn-architecture(7). */
+#define OVN_GENEVE_CLASS 0xffff
+#define OVN_GENEVE_TYPE 0
+#define OVN_GENEVE_LEN 4
+
 void physical_init(struct controller_ctx *);
 void physical_run(struct controller_ctx *);
 

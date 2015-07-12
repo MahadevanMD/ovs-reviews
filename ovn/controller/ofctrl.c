@@ -27,6 +27,7 @@
 #include "openflow/openflow.h"
 #include "openvswitch/vlog.h"
 #include "ovn-controller.h"
+#include "physical.h"
 #include "rconn.h"
 #include "socket-util.h"
 
@@ -52,12 +53,65 @@ static char *ovn_flow_to_string(const struct ovn_flow *);
 static void ovn_flow_log(const struct ovn_flow *, const char *action);
 static void ovn_flow_destroy(struct ovn_flow *);
 
+static ovs_be32 queue_msg(struct ofpbuf *);
+
 /* OpenFlow connection to the switch. */
 static struct rconn *swconn;
 
 /* Last seen sequence number for 'swconn'.  When this differs from
  * rconn_get_connection_seqno(rconn), 'swconn' has reconnected. */
 static unsigned int seqno;
+
+/* Connection state machine. */
+static enum ofctrl_state {
+    /* Newly connected.
+     *
+     * Action: Send a NXT_GENEVE_TABLE_REQUEST and transition to
+     * S_GENEVE_TABLE_REQUESTED.  */
+    S_NEW,
+
+    /* If we receive an NXT_GENEVE_TABLE_REPLY:
+     *
+     *     - If it contains our tunnel metadata option, assign its field ID to
+     *       ctx->mff_ovn_geneve and transition to S_CLEAR_FLOWS.
+     *
+     *     - Otherwise, if there is an unused tunnel metadata field ID, send
+     *       NXT_GENEVE_TABLE_MOD and OFPT_BARRIER_REQUEST, and transition to
+     *       S_GENEVE_TABLE_MOD_SENT.
+     *
+     *     - Otherwise, log an error, disable Geneve, and transition to
+     *       S_CLEAR_FLOWS.
+     *
+     * If we receive an OFPT_ERROR:
+     *
+     *     - Log an error, disable Geneve, and transition to S_CLEAR_FLOWS. */
+    S_GENEVE_TABLE_REQUESTED,
+
+    /* If we receive an OFPT_ERROR:
+     *
+     *     - If the error is NXGTMFC_ALREADY_MAPPED or NXGTMFC_DUP_ENTRY, we
+     *       raced with some other controller.  Transition to S_NEW.
+     *
+     *     - Otherwise, log an error, disable Geneve, and transition to
+     *       S_CLEAR_FLOWS.
+     *
+     * If we receive OFPT_BARRIER_REPLY:
+     *
+     *     - Set the tunnel metadata field ID to the one that we requested.
+     *       Transition to S_CLEAR_FLOWS.
+     */
+    S_GENEVE_TABLE_MOD_SENT,
+
+    /* Send an OFPT_TABLE_MOD to clear all flows.  Transition to
+     * S_UPDATE_FLOWS. */
+    S_CLEAR_FLOWS,
+
+    /* Compare the installed flows to the ones we want.  Send OFPT_FLOW_MOD as
+     * necessary. */
+    S_UPDATE_FLOWS,
+} state;
+
+static ovs_be32 xid, xid2;
 
 /* Counter for in-flight OpenFlow messages on 'swconn'.  We only send a new
  * round of flow table modifications to the switch when the counter falls to
@@ -75,7 +129,7 @@ static void ovn_flow_table_clear(struct hmap *flow_table);
 static void ovn_flow_table_destroy(struct hmap *flow_table);
 
 static void ofctrl_update_flows(void);
-static void ofctrl_recv(const struct ofpbuf *msg);
+static void ofctrl_recv(const struct ofp_header *);
 
 void
 ofctrl_init(void)
@@ -84,6 +138,109 @@ ofctrl_init(void)
     tx_counter = rconn_packet_counter_create();
     hmap_init(&desired_flows);
     hmap_init(&installed_flows);
+}
+
+static void
+run_NEW(void)
+{
+    struct ofpbuf *buf = ofpraw_alloc(OFPRAW_NXT_GENEVE_TABLE_REQUEST,
+                                      rconn_get_version(swconn), 0);
+    xid = queue_msg(buf);
+    state = S_GENEVE_TABLE_REQUESTED;
+}
+
+static void
+recv_NEW(const struct ofp_header *oh OVS_UNUSED, enum ofptype type OVS_UNUSED)
+{
+    OVS_NOT_REACHED();
+}
+
+static void
+run_GENEVE_TABLE_REQUESTED(void)
+{
+}
+
+static void
+recv_GENEVE_TABLE_REQUESTED(const struct ofp_header *oh, enum ofptype type)
+{
+    if (oh->xid != xid) {
+        ofctrl_recv(oh);
+        return;
+    }
+
+    if (type == OFPTYPE_NXT_GENEVE_TABLE_REPLY) {
+        struct ofputil_geneve_table_reply reply;
+        enum ofperr error = ofputil_decode_geneve_table_reply(oh, &reply);
+        if (error) {
+            VLOG_ERR("failed to decode Geneve table request (%s)",
+                     ofperr_to_string(error));
+            goto error;
+        }
+
+        const struct ofputil_geneve_map *map;
+        uint64_t md_free = UINT64_MAX;
+        BUILD_ASSERT(TUN_METADATA_NUM_OPTS == 64);
+
+        LIST_FOR_EACH (map, list_node, &reply.mappings) {
+            if (map->option_class == OVN_GENEVE_CLASS
+                && map->option_type == OVN_GENEVE_TYPE
+                && map->option_len == OVN_GENEVE_LEN) {
+                if (map->index >= TUN_METADATA_NUM_OPTS) {
+                    VLOG_ERR("desired Geneve tunnel option 0x%"PRIx16","
+                             "%"PRIu8",%"PRIu8" already in use with "
+                             "unsupported index %"PRIu16,
+                             map->option_class, map->option_type,
+                             map->option_len, map->index);
+                    goto error;
+                } else {
+                    ctx->mff_ovn_geneve = MFF_TUN_METADATA0 + map->index;
+                    state = S_CLEAR_FLOWS;
+                    return;
+                }
+            }
+
+            if (map->index < TUN_METADATA_NUM_OPTS) {
+                md_free &= ~(UINT64_C(1) << map->index);
+            }
+        }
+
+        VLOG_DBG("OVN Geneve option not found");
+        if (!md_free) {
+            VLOG_ERR("no Geneve options free for use by OVN");
+            goto error;
+        }
+
+        unsigned int index = rightmost_1bit_idx(md_free);
+        ctx->mff_ovn_geneve = MFF_TUN_METADATA0 + index;
+        struct ofputil_geneve_map gm;
+        gm.option_class = OVN_GENEVE_CLASS;
+        gm.option_type = OVN_GENEVE_TYPE;
+        gm.option_len = OVN_GENEVE_LEN;
+        gm.index = index;
+
+        struct ofputil_geneve_table_mod gtm;
+        gtm.command = NXGTMC_ADD;
+        list_init(&gtm.mappings);
+        list_push_back(&gtm.mappings, &gm.list_node);
+
+        xid = queue_msg(ofputil_encode_geneve_table_mod(OFP13_VERSION,
+                                                        &gtm));
+        xid2 = queue_msg(ofputil_encode_barrier_request(OFP13_VERSION));
+        state = S_GENEVE_TABLE_MOD_SENT;
+        return;
+    } else if (type == OFPTYPE_ERROR) {
+        VLOG_ERR("switch refused to allocate Geneve option (%s)",
+                 ofperr_to_string(ofperr_decode_msg(oh)));
+    } else {
+        char *s = ofp_to_string(oh, ntohs(oh->length), 1);
+        VLOG_ERR("unexpected reply to Geneve option allocation request (%s)",
+                 s);
+        free(s);
+    }
+
+error:
+    ctx->mff_ovn_geneve = 0;
+    state = S_CLEAR_FLOWS;
 }
 
 /* This function should be called in the main loop after anything that updates
@@ -104,6 +261,180 @@ ofctrl_run(struct controller_ctx *ctx)
     if (!rconn_is_connected(swconn)) {
         return;
     }
+    if (seqno != rconn_get_connection_seqno(swconn)) {
+        seqno = rconn_get_connection_seqno(swconn);
+        state = S_NEW;
+    }
+
+    enum ofctrl_state old_state;
+    do {
+        old_state = rc->state;
+        switch (rc->state) {
+#define STATE(NAME, VALUE) case S_##NAME: run_##NAME(rc); break;
+            STATES
+#undef STATE
+        default:
+            OVS_NOT_REACHED();
+        }
+    } while (rc->state != old_state);
+
+    for (int i = 0; rc->state == old_state && i < 50; i++) {
+        struct ofpbuf *msg = rconn_recv(swconn);
+        if (!msg) {
+            break;
+        }
+
+        switch (rc->state) {
+#define STATE(NAME, VALUE) case S_##NAME: recv_##NAME(rc); break;
+            STATES
+#undef STATE
+        default:
+            OVS_NOT_REACHED();
+        }
+
+        ofpbuf_delete(msg);
+    }
+
+    switch (state) {
+    case S_NEW:
+        break;
+
+    case S_GENEVE_TABLE_REQUESTED:
+        buf = rconn_recv(swconn);
+        if (buf) {
+            msg = buf->data;
+            if (msg->xid == xid) {
+                enum ofptype type;
+                struct ofpbuf b;
+
+                b = *buf;
+                if (ofptype_pull(&type, &b)) {
+                    /* XXX */
+                } else if (type == OFPTYPE_NXT_GENEVE_TABLE_REPLY) {
+                    struct ofputil_geneve_table_reply reply;
+
+                    error = ofputil_decode_geneve_table_reply(msg, &reply);
+                    if (!error) {
+                        const struct ofputil_geneve_map *map;
+                        uint64_t md_free = UINT64_MAX;
+                        BUILD_ASSERTE(TUN_METADATA_NUM_OPTS == 64);
+
+                        LIST_FOR_EACH (map, list_node, &reply.mappings) {
+                            if (map->option_class == OVN_GENEVE_CLASS
+                                && map->option_type == OVN_GENEVE_TYPE
+                                && map->option_len == OVN_GENEVE_LEN) {
+                                if (map->index >= TUN_METADATA_NUM_OPTS) {
+                                    /* XXX */
+                                } else {
+                                    ctx->mff_ovn_geneve = MFF_TUN_METADATA0 + map->index;
+                                    state = S_CLEAR_FLOWS;
+                                    goto next;
+                                }
+                            }
+
+                            if (map->index < TUN_METADATA_NUM_OPTS) {
+                                md_free &= ~(UINT64_C(1) << map->index);
+                            }
+                        }
+
+                        VLOG_DBG("OVN Geneve option not found");
+                        if (!md_free) {
+                            /* XXX */
+                        }
+
+                        unsigned int index = rightmost_1bit_idx(md_free);
+                        ctx->mff_ovn_geneve = MFF_TUN_METADATA0 + index;
+                        struct ofputil_geneve_map gm;
+                        gm.option_class = OVN_GENEVE_CLASS;
+                        gm.option_type = OVN_GENEVE_TYPE;
+                        gm.option_len = OVN_GENEVE_LEN;
+                        gm.index = index;
+
+                        struct ofputil_geneve_table_mod gtm;
+                        gtm.command = NXGTMC_ADD;
+                        list_init(&gtm.mappings);
+                        list_push_back(&gtm.mappings, &gm.list_node);
+
+                        buf = ofputil_encode_geneve_table_mod(OFP13_VERSION,
+                                                              &gtm);
+                        msg = buf->data;
+                        xid = msg->xid;
+                        queue_msg(buf);
+
+                        buf = ofputil_encode_barrier_request(OFP13_VERSION);
+                        msg = buf->data;
+                        xid2 = msg->xid;
+                        queue_msg(buf);
+
+                        state = S_GENEVE_TABLE_MOD_SENT;
+
+                        next: ;
+                    }
+
+                } else if (type == OFPTYPE_ERROR) {
+                    /* XXX */
+                } else {
+                    /* XXX */
+
+                }
+            } else {
+                ofctrl_recv(buf);
+            }
+            ofpbuf_delete(buf);
+        }
+        break;
+
+    case S_GENEVE_TABLE_MOD_SENT:
+        buf = rconn_recv(swconn);
+        if (buf) {
+            msg = buf->data;
+            if (msg->xid == xid || msg->xid == xid2) {
+                enum ofptype type;
+                struct ofpbuf b;
+
+                b = *buf;
+                if (ofptype_pull(&type, &b)) {
+                    /* XXX */
+                } else if (msg->xid == xid2 && type == OFPTYPE_BARRIER_REPLY) {
+                    state = S_CLEAR_FLOWS;
+                } else if (msg->xid == xid1 && type == OFPTYPE_ERROR) {
+                    error = ofperr_decode_msg(msg);
+                    if (error == OFPERR_NXGTMFC_ALREADY_MAPPED ||
+                        error == OFPERR_NXGTMFC_DUP_ENTRY) {
+                        VLOG_INFO("raced with another controller adding "
+                                  "Geneve option (%s); trying again",
+                                  ofperr_to_string(error));
+                        state = S_NEW;
+                    } else {
+                        /* XXX */
+                    }
+                }
+            } else {
+                ofctrl_recv(buf);
+            }
+            ofpbuf_delete(buf);
+        }
+        break;
+
+    case S_CLEAR_FLOWS:
+        /* Send a flow_mod to delete all flows. */
+        struct ofputil_flow_mod fm = {
+            .match = MATCH_CATCHALL_INITIALIZER,
+            .table_id = OFPTT_ALL,
+            .command = OFPFC_DELETE,
+        };
+        queue_flow_mod(&fm);
+        VLOG_DBG("clearing all flows");
+
+        /* Clear installed_flows, to match the state of the switch. */
+        ovn_flow_table_clear(&installed_flows);
+
+        state = S_UPDATE_FLOWS;
+        break;
+    }
+    
+
+
     if (!rconn_packet_counter_n_packets(tx_counter)) {
         ofctrl_update_flows();
     }
@@ -135,10 +466,13 @@ ofctrl_destroy(void)
     rconn_packet_counter_destroy(tx_counter);
 }
 
-static void
+static ovs_be32
 queue_msg(struct ofpbuf *msg)
 {
+    const struct ofp_header *oh = msg->data;
+    ovs_be32 xid = oh->xid;
     rconn_send(swconn, msg, tx_counter);
+    return xid;
 }
 
 static void
@@ -358,6 +692,7 @@ ovn_flow_table_clear(struct hmap *flow_table)
         ovn_flow_destroy(f);
     }
 }
+
 static void
 ovn_flow_table_destroy(struct hmap *flow_table)
 {
@@ -379,25 +714,6 @@ queue_flow_mod(struct ofputil_flow_mod *fm)
 static void
 ofctrl_update_flows(void)
 {
-    /* If we've (re)connected, don't make any assumptions about the flows in
-     * the switch: delete all of them.  (We'll immediately repopulate it
-     * below.) */
-    if (seqno != rconn_get_connection_seqno(swconn)) {
-        seqno = rconn_get_connection_seqno(swconn);
-
-        /* Send a flow_mod to delete all flows. */
-        struct ofputil_flow_mod fm = {
-            .match = MATCH_CATCHALL_INITIALIZER,
-            .table_id = OFPTT_ALL,
-            .command = OFPFC_DELETE,
-        };
-        queue_flow_mod(&fm);
-        VLOG_DBG("clearing all flows");
-
-        /* Clear installed_flows, to match the state of the switch. */
-        ovn_flow_table_clear(&installed_flows);
-    }
-
     /* Iterate through all of the installed flows.  If any of them are no
      * longer desired, delete them; if any of them should have different
      * actions, update them. */
