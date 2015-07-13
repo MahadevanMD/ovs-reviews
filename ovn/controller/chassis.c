@@ -45,17 +45,15 @@ chassis_init(struct controller_ctx *ctx)
 }
 
 static void
-register_chassis(struct controller_ctx *ctx)
+register_chassis(struct controller_ctx *ctx,
+                 const struct sbrec_chassis *chassis_rec)
 {
-    const struct sbrec_chassis *chassis_rec;
     const struct ovsrec_open_vswitch *cfg;
     const char *encap_type, *encap_ip;
     struct sbrec_encap *encap_rec;
     static bool inited = false;
     int retval = TXN_TRY_AGAIN;
     struct ovsdb_idl_txn *txn;
-
-    chassis_rec = get_chassis_by_name(ctx->ovnsb_idl, ctx->chassis_id);
 
     /* xxx Need to support more than one encap.  Also need to support
      * xxx encap options. */
@@ -99,7 +97,7 @@ register_chassis(struct controller_ctx *ctx)
 
     if (!chassis_rec) {
         chassis_rec = sbrec_chassis_insert(txn);
-        sbrec_chassis_set_name(chassis_rec, ctx->chassis_id);
+        sbrec_chassis_set_name(chassis_rec, chassis_id);
     }
 
     encap_rec = sbrec_encap_insert(txn);
@@ -307,9 +305,9 @@ preferred_encap(const struct sbrec_chassis *chassis_rec)
 }
 
 static void
-update_encaps(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int)
+update_encaps(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int,
+              const struct sbrec_chassis *chassis_rec)
 {
-    const struct sbrec_chassis *chassis_rec;
     const struct ovsrec_bridge *br;
     int retval;
 
@@ -322,7 +320,7 @@ update_encaps(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int)
     tc.ovs_txn = ovsdb_idl_txn_create(ctx->ovs_idl);
     ovsdb_idl_txn_add_comment(tc.ovs_txn,
                               "ovn-controller: modifying OVS tunnels '%s'",
-                              ctx->chassis_id);
+                              chassis_rec->name);
 
     /* Collect all port names into tc.port_names.
      *
@@ -377,16 +375,18 @@ update_encaps(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int)
 }
 
 void
-chassis_run(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int)
+chassis_run(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int,
+            const struct sbrec_chassis *chassis_rec)
 {
     if (br_int) {
-        register_chassis(ctx);
-        update_encaps(ctx, br_int);
+        register_chassis(ctx, chassis_rec);
+        update_encaps(ctx, br_int, chassis_rec);
     }
 }
 
 void
-chassis_destroy(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int)
+chassis_destroy(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int,
+                const char *chassis_id)
 {
     int retval = TXN_TRY_AGAIN;
 
@@ -396,7 +396,7 @@ chassis_destroy(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int)
         const struct sbrec_chassis *chassis_rec;
         struct ovsdb_idl_txn *txn;
 
-        chassis_rec = get_chassis_by_name(ctx->ovnsb_idl, ctx->chassis_id);
+        chassis_rec = get_chassis_by_name(ctx->ovnsb_idl, chassis_id);
         if (!chassis_rec) {
             break;
         }
@@ -404,7 +404,7 @@ chassis_destroy(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int)
         txn = ovsdb_idl_txn_create(ctx->ovnsb_idl);
         ovsdb_idl_txn_add_comment(txn,
                                   "ovn-controller: unregistering chassis '%s'",
-                                  ctx->chassis_id);
+                                  chassis_id);
         sbrec_chassis_delete(chassis_rec);
 
         retval = ovsdb_idl_txn_commit_block(txn);

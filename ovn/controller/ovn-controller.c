@@ -211,9 +211,12 @@ main(int argc, char *argv[])
             break;
         }
 
+        const struct sbrec_chassis *chassis = get_chassis_by_name(
+            ctx.ovnsb_idl, ctx.chassis_id);
+
         struct hmap flow_table = HMAP_INITIALIZER(&flow_table);
-        chassis_run(&ctx, br_int);
-        binding_run(&ctx, br_int);
+        chassis_run(&ctx, br_int, chassis);
+        binding_run(&ctx, br_int, chassis);
         pipeline_run(&ctx, &flow_table);
         physical_run(&ctx, br_int, &flow_table);
         ofctrl_run(br_int, &flow_table);
@@ -235,8 +238,8 @@ main(int argc, char *argv[])
     unixctl_server_destroy(unixctl);
     pipeline_destroy(&ctx);
     ofctrl_destroy();
-    binding_destroy(&ctx);
-    chassis_destroy(&ctx, get_bridge(&ctx, br_int_name));
+    binding_destroy(&ctx, get_chassis_by_name(ctx.ovnsb_idl, ctx.chassis_id));
+    chassis_destroy(&ctx, get_bridge(&ctx, br_int_name), ctx.chassis_id);
 
     ovsdb_idl_destroy(ctx.ovs_idl);
     ovsdb_idl_destroy(ctx.ovnsb_idl);

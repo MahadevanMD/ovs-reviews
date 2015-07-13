@@ -18,10 +18,13 @@
 
 struct controller_ctx;
 struct ovsrec_bridge;
+struct sbrec_chassis;
 
 void chassis_init(struct controller_ctx *);
-void chassis_run(struct controller_ctx *, const struct ovsrec_bridge *br_int);
+void chassis_run(struct controller_ctx *, const struct ovsrec_bridge *br_int,
+                 const struct sbrec_chassis *);
 void chassis_destroy(struct controller_ctx *,
-                     const struct ovsrec_bridge *br_int);
+                     const struct ovsrec_bridge *br_int,
+                     const char *chassis_id);
 
 #endif /* ovn/chassis.h */

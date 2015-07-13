@@ -19,9 +19,11 @@
 
 struct controller_ctx;
 struct ovsrec_bridge;
+struct sbrec_chassis;
 
 void binding_init(struct controller_ctx *);
-void binding_run(struct controller_ctx *, const struct ovsrec_bridge *br_int);
-void binding_destroy(struct controller_ctx *);
+void binding_run(struct controller_ctx *, const struct ovsrec_bridge *br_int,
+                 const struct sbrec_chassis *);
+void binding_destroy(struct controller_ctx *, const struct sbrec_chassis *);
 
 #endif /* ovn/binding.h */

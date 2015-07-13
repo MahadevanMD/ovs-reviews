@@ -72,16 +72,15 @@ get_local_iface_ids(const struct ovsrec_bridge *br_int, struct sset *lports)
 }
 
 void
-binding_run(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int)
+binding_run(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int,
+            const struct sbrec_chassis *chassis_rec)
 {
-    const struct sbrec_chassis *chassis_rec;
     const struct sbrec_binding *binding_rec;
     struct ovsdb_idl_txn *txn;
     struct sset lports, all_lports;
     const char *name;
     int retval;
 
-    chassis_rec = get_chassis_by_name(ctx->ovnsb_idl, ctx->chassis_id);
     if (!chassis_rec) {
         return;
     }
@@ -94,7 +93,7 @@ binding_run(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int)
     txn = ovsdb_idl_txn_create(ctx->ovnsb_idl);
     ovsdb_idl_txn_add_comment(txn,
                               "ovn-controller: updating bindings for '%s'",
-                              ctx->chassis_id);
+                              chassis_rec->name);
 
     SBREC_BINDING_FOR_EACH(binding_rec, ctx->ovnsb_idl) {
         if (sset_find_and_delete(&lports, binding_rec->logical_port) ||
@@ -131,14 +130,13 @@ binding_run(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int)
 }
 
 void
-binding_destroy(struct controller_ctx *ctx)
+binding_destroy(struct controller_ctx *ctx,
+                const struct sbrec_chassis *chassis_rec)
 {
-    const struct sbrec_chassis *chassis_rec;
     int retval = TXN_TRY_AGAIN;
 
     ovs_assert(ctx->ovnsb_idl);
 
-    chassis_rec = get_chassis_by_name(ctx->ovnsb_idl, ctx->chassis_id);
     if (!chassis_rec) {
         return;
     }
@@ -150,7 +148,7 @@ binding_destroy(struct controller_ctx *ctx)
         txn = ovsdb_idl_txn_create(ctx->ovnsb_idl);
         ovsdb_idl_txn_add_comment(txn,
                               "ovn-controller: removing all bindings for '%s'",
-                              ctx->chassis_id);
+                              chassis_rec->name);
 
         SBREC_BINDING_FOR_EACH(binding_rec, ctx->ovnsb_idl) {
             if (binding_rec->chassis == chassis_rec) {
