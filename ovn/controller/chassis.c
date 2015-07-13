@@ -307,7 +307,7 @@ preferred_encap(const struct sbrec_chassis *chassis_rec)
 }
 
 static void
-update_encaps(struct controller_ctx *ctx)
+update_encaps(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int)
 {
     const struct sbrec_chassis *chassis_rec;
     const struct ovsrec_bridge *br;
@@ -316,7 +316,7 @@ update_encaps(struct controller_ctx *ctx)
     struct tunnel_ctx tc = {
         .tunnel_hmap = HMAP_INITIALIZER(&tc.tunnel_hmap),
         .port_names = SSET_INITIALIZER(&tc.port_names),
-        .br_int = ctx->br_int
+        .br_int = br_int
     };
 
     tc.ovs_txn = ovsdb_idl_txn_create(ctx->ovs_idl);
@@ -377,14 +377,16 @@ update_encaps(struct controller_ctx *ctx)
 }
 
 void
-chassis_run(struct controller_ctx *ctx)
+chassis_run(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int)
 {
-    register_chassis(ctx);
-    update_encaps(ctx);
+    if (br_int) {
+        register_chassis(ctx);
+        update_encaps(ctx, br_int);
+    }
 }
 
 void
-chassis_destroy(struct controller_ctx *ctx)
+chassis_destroy(struct controller_ctx *ctx, const struct ovsrec_bridge *br_int)
 {
     int retval = TXN_TRY_AGAIN;
 
@@ -413,6 +415,10 @@ chassis_destroy(struct controller_ctx *ctx)
         ovsdb_idl_txn_destroy(txn);
     }
 
+    if (!br_int) {
+        return;
+    }
+
     retval = TXN_TRY_AGAIN;
     while (retval != TXN_SUCCESS && retval != TXN_UNCHANGED) {
         struct ovsrec_port **ports;
@@ -425,15 +431,15 @@ chassis_destroy(struct controller_ctx *ctx)
 
         /* Delete all the OVS-created tunnels from the integration
          * bridge. */
-        ports = xmalloc(sizeof *ctx->br_int->ports * ctx->br_int->n_ports);
-        for (i = n = 0; i < ctx->br_int->n_ports; i++) {
-            if (!smap_get(&ctx->br_int->ports[i]->external_ids,
+        ports = xmalloc(sizeof *br_int->ports * br_int->n_ports);
+        for (i = n = 0; i < br_int->n_ports; i++) {
+            if (!smap_get(&br_int->ports[i]->external_ids,
                           "ovn-chassis-id")) {
-                ports[n++] = ctx->br_int->ports[i];
+                ports[n++] = br_int->ports[i];
             }
         }
-        ovsrec_bridge_verify_ports(ctx->br_int);
-        ovsrec_bridge_set_ports(ctx->br_int, ports, n);
+        ovsrec_bridge_verify_ports(br_int);
+        ovsrec_bridge_set_ports(br_int, ports, n);
         free(ports);
 
         retval = ovsdb_idl_txn_commit_block(txn);

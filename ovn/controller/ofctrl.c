@@ -27,6 +27,7 @@
 #include "openflow/openflow.h"
 #include "openvswitch/vlog.h"
 #include "ovn-controller.h"
+#include "vswitch-idl.h"
 #include "rconn.h"
 #include "socket-util.h"
 
@@ -82,22 +83,26 @@ ofctrl_init(void)
     hmap_init(&installed_flows);
 }
 
-/* Attempts to update the OpenFlow flows in bridge 'br_int_name' to those in
+/* Attempts to update the OpenFlow flows in bridge 'br_int' to those in
  * 'flow_table'.  Removes all of the flows from 'flow_table' and frees them.
  *
  * The flow table will only be updated if we've got an OpenFlow connection to
- * 'br_int_name' and it's not backlogged.  Otherwise, it'll have to wait until
- * the next iteration. */
+ * 'br_int' and it's not backlogged.  Otherwise, it'll have to wait until the
+ * next iteration. */
 void
-ofctrl_run(struct controller_ctx *ctx, struct hmap *flow_table)
+ofctrl_run(const struct ovsrec_bridge *br_int, struct hmap *flow_table)
 {
-    char *target;
-    target = xasprintf("unix:%s/%s.mgmt", ovs_rundir(), ctx->br_int_name);
-    if (strcmp(target, rconn_get_target(swconn))) {
-        VLOG_INFO("%s: connecting to switch", target);
-        rconn_connect(swconn, target, target);
+    if (br_int) {
+        char *target;
+        target = xasprintf("unix:%s/%s.mgmt", ovs_rundir(), br_int->name);
+        if (strcmp(target, rconn_get_target(swconn))) {
+            VLOG_INFO("%s: connecting to switch", target);
+            rconn_connect(swconn, target, target);
+        }
+        free(target);
+    } else {
+        rconn_disconnect(swconn);
     }
-    free(target);
 
     rconn_run(swconn);
 

@@ -18,9 +18,10 @@
 #define OVN_BINDING_H 1
 
 struct controller_ctx;
+struct ovsrec_bridge;
 
 void binding_init(struct controller_ctx *);
-void binding_run(struct controller_ctx *);
+void binding_run(struct controller_ctx *, const struct ovsrec_bridge *br_int);
 void binding_destroy(struct controller_ctx *);
 
 #endif /* ovn/binding.h */
