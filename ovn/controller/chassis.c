@@ -52,8 +52,6 @@ register_chassis(struct controller_ctx *ctx)
     const char *encap_type, *encap_ip;
     struct sbrec_encap *encap_rec;
     static bool inited = false;
-    int retval = TXN_TRY_AGAIN;
-    struct ovsdb_idl_txn *txn;
 
     chassis_rec = get_chassis_by_name(ctx->ovnsb_idl, ctx->chassis_id);
 
@@ -92,30 +90,21 @@ register_chassis(struct controller_ctx *ctx)
         }
     }
 
-    txn = ovsdb_idl_txn_create(ctx->ovnsb_idl);
-    ovsdb_idl_txn_add_comment(txn,
+    ovsdb_idl_txn_add_comment(ctx->ovnsb_idl_txn,
                               "ovn-controller: registering chassis '%s'",
                               ctx->chassis_id);
 
     if (!chassis_rec) {
-        chassis_rec = sbrec_chassis_insert(txn);
+        chassis_rec = sbrec_chassis_insert(ctx->ovnsb_idl_txn);
         sbrec_chassis_set_name(chassis_rec, ctx->chassis_id);
     }
 
-    encap_rec = sbrec_encap_insert(txn);
+    encap_rec = sbrec_encap_insert(ctx->ovnsb_idl_txn);
 
     sbrec_encap_set_type(encap_rec, encap_type);
     sbrec_encap_set_ip(encap_rec, encap_ip);
 
     sbrec_chassis_set_encaps(chassis_rec, &encap_rec, 1);
-
-    retval = ovsdb_idl_txn_commit_block(txn);
-    if (retval != TXN_SUCCESS && retval != TXN_UNCHANGED) {
-        VLOG_INFO("Problem registering chassis: %s",
-                  ovsdb_idl_txn_status_to_string(retval));
-        poll_immediate_wake();
-    }
-    ovsdb_idl_txn_destroy(txn);
 
     inited = true;
 }
@@ -379,6 +368,10 @@ update_encaps(struct controller_ctx *ctx)
 void
 chassis_run(struct controller_ctx *ctx)
 {
+    if (!ctx->ovnsb_idl_txn) {
+        return;
+    }
+
     register_chassis(ctx);
     update_encaps(ctx);
 }

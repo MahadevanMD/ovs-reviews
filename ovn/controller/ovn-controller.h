@@ -22,7 +22,10 @@
 struct controller_ctx {
     char *chassis_id;               /* ID for this chassis. */
     char *br_int_name;              /* Name of local integration bridge. */
+
     struct ovsdb_idl *ovnsb_idl;
+    struct ovsdb_idl_txn *ovnsb_idl_txn;
+
     struct ovsdb_idl *ovs_idl;
 
     const struct ovsrec_bridge *br_int;

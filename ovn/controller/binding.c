@@ -76,13 +76,15 @@ binding_run(struct controller_ctx *ctx)
 {
     const struct sbrec_chassis *chassis_rec;
     const struct sbrec_binding *binding_rec;
-    struct ovsdb_idl_txn *txn;
     struct sset lports, all_lports;
     const char *name;
-    int retval;
 
     chassis_rec = get_chassis_by_name(ctx->ovnsb_idl, ctx->chassis_id);
     if (!chassis_rec) {
+        return;
+    }
+
+    if (!ctx->ovnsb_idl_txn) {
         return;
     }
 
@@ -91,8 +93,7 @@ binding_run(struct controller_ctx *ctx)
     get_local_iface_ids(ctx, &lports);
     sset_clone(&all_lports, &lports);
 
-    txn = ovsdb_idl_txn_create(ctx->ovnsb_idl);
-    ovsdb_idl_txn_add_comment(txn,
+    ovsdb_idl_txn_add_comment(ctx->ovnsb_idl_txn,
                               "ovn-controller: updating bindings for '%s'",
                               ctx->chassis_id);
 
@@ -115,14 +116,6 @@ binding_run(struct controller_ctx *ctx)
         }
     }
 
-    retval = ovsdb_idl_txn_commit_block(txn);
-    if (retval == TXN_ERROR) {
-        VLOG_INFO("Problem committing binding information: %s",
-                  ovsdb_idl_txn_status_to_string(retval));
-    }
-
-    ovsdb_idl_txn_destroy(txn);
-
     SSET_FOR_EACH (name, &lports) {
         VLOG_DBG("No binding record for lport %s", name);
     }
@@ -133,19 +126,18 @@ binding_run(struct controller_ctx *ctx)
 void
 binding_destroy(struct controller_ctx *ctx)
 {
-    const struct sbrec_chassis *chassis_rec;
     int retval = TXN_TRY_AGAIN;
 
     ovs_assert(ctx->ovnsb_idl);
-
-    chassis_rec = get_chassis_by_name(ctx->ovnsb_idl, ctx->chassis_id);
-    if (!chassis_rec) {
-        return;
-    }
-
     while (retval != TXN_SUCCESS && retval != TXN_UNCHANGED) {
         const struct sbrec_binding *binding_rec;
+        const struct sbrec_chassis *chassis_rec;
         struct ovsdb_idl_txn *txn;
+
+        chassis_rec = get_chassis_by_name(ctx->ovnsb_idl, ctx->chassis_id);
+        if (!chassis_rec) {
+            return;
+        }
 
         txn = ovsdb_idl_txn_create(ctx->ovnsb_idl);
         ovsdb_idl_txn_add_comment(txn,
